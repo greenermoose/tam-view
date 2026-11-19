@@ -6,19 +6,33 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
+#include <regex.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MAX_ROWS 512
 #define MAX_COLUMNS 4096
 #define SEARCH_SIZE 512
+#define MARK_COUNT 53
+#define MARK_PREV 52
+#define LINE_BUF_MAX (16 * 1024 * 1024)
 
 enum job { IDLE, ADVANCE, GO_LINE, GO_END, SEARCH };
-enum prompt { COMMAND, FIND_FORWARD, FIND_BACKWARD, HELP };
+enum prompt {
+    COMMAND,
+    FIND_FORWARD,
+    FIND_BACKWARD,
+    MARK_SET,
+    MARK_GOTO,
+    COLON,
+    HELP
+};
 
 struct frame {
     struct position rows[MAX_ROWS];
@@ -29,18 +43,40 @@ struct frame {
     bool document;
 };
 
+struct mark {
+    bool set;
+    size_t file;
+    struct position pos;
+    int h_offset;
+};
+
+struct file_entry {
+    const char *path;
+    struct source source;
+    int fd;
+    bool opened;
+    bool own_fd;
+    struct position top;
+    int h_offset;
+};
+
 struct search {
-    unsigned char term[SEARCH_SIZE];
-    size_t length;
-    size_t prefix[SEARCH_SIZE];
-    size_t matched;
+    regex_t regex;
+    bool valid;
     int direction;
     int original_direction;
     off_t hit;
+    off_t anchor;
+    bool first_line;
+    char *line;
+    size_t line_cap;
 };
 
 struct pager {
     struct source *source;
+    struct file_entry *files;
+    size_t file_count;
+    size_t file_index;
     tam_tty_t tty;
     tam_key_parser_t keys;
     struct frame current;
@@ -49,15 +85,22 @@ struct pager {
     struct position cursor;
     int height;
     int width;
+    int h_offset;
+    bool chop;
+    bool following;
+    bool hold_eof;
+    off_t follow_size;
     enum job job;
     enum prompt prompt;
     uint64_t count;
     uint64_t remaining;
     struct search search;
+    struct mark marks[MARK_COUNT];
     char query[SEARCH_SIZE + 1];
     size_t query_length;
     const char *label;
     const char *message;
+    char message_buf[SEARCH_SIZE + 80];
     bool waiting;
     bool dirty;
     bool scroll;
@@ -155,7 +198,8 @@ static int back(struct pager *p, struct position end, int count,
         int saved = 0;
         while (position_compare(row, end) < 0) {
             struct position next;
-            int result = view_row(p->source, row, p->width, NULL, &next);
+            int result = view_row_h(p->source, row, p->width,
+                                    p->h_offset, p->chop, NULL, &next);
             if (result == VIEW_ERROR)
                 return -1;
             if (result != VIEW_ROW)
@@ -183,9 +227,14 @@ static int align(struct pager *p, struct position target, struct position *out)
     if (offset < 0)
         return -1;
     struct position row = {.byte = offset};
+    if (p->h_offset > 0 || p->chop) {
+        *out = row;
+        return 0;
+    }
     while (position_compare(row, target) < 0) {
         struct position next;
-        int result = view_row(p->source, row, p->width, NULL, &next);
+        int result = view_row_h(p->source, row, p->width,
+                                p->h_offset, p->chop, NULL, &next);
         if (result == VIEW_ERROR)
             return -1;
         if (result != VIEW_ROW || position_compare(next, target) > 0)
@@ -227,9 +276,14 @@ static int build_page(struct pager *p, struct position *end)
             "Space / Page Down      Next page",
             "b / Page Up            Previous page",
             "d / u                  Half page down / up",
+            "Left / Right           Scroll horizontally",
+            "S                      Toggle chop long lines",
             "g / G / Ng             Start / end / line N",
-            "/ / ?                  Find literal text",
+            "m<a-z> / '<a-z> / ''   Set mark / go to mark / previous",
+            "/ / ?                  Find POSIX regex forward / backward",
             "n / N                  Repeat / reverse search",
+            ":n / :p / :x / :f      Next / prev / first / current file",
+            "F                      Follow growing file or pipe",
             "q                      Quit and keep the page"
         };
         for (size_t i = 0; i < sizeof(help) / sizeof(help[0]) &&
@@ -243,8 +297,9 @@ static int build_page(struct pager *p, struct position *end)
     for (; f->count < p->height; f->count++) {
         struct position row = *end;
         f->rows[f->count] = row;
-        int result = view_row(p->source, row, p->width,
-                              f->text + f->count * f->stride, end);
+        int result = view_row_h(p->source, row, p->width,
+                                p->h_offset, p->chop,
+                                f->text + f->count * f->stride, end);
         if (result != VIEW_ROW)
             return result;
     }
@@ -260,12 +315,20 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
     char text[SEARCH_SIZE + 80];
     if (p->prompt == HELP) {
         message = "Press any key to return";
+    } else if (p->prompt == MARK_SET) {
+        message = "mark: ";
+    } else if (p->prompt == MARK_GOTO) {
+        message = "goto mark: ";
+    } else if (p->prompt == COLON) {
+        message = ":";
     } else if (p->prompt == FIND_FORWARD || p->prompt == FIND_BACKWARD) {
         snprintf(text, sizeof(text), "%c%s",
                  p->prompt == FIND_FORWARD ? '/' : '?', p->query);
         message = text;
     } else if (p->job == SEARCH) {
         message = "Searching... (Ctrl-C cancels)";
+    } else if (!message && p->following) {
+        message = "Waiting for data... (Ctrl-C to stop, q to quit)";
     } else if (!message && (page_state == VIEW_WAIT || p->job != IDLE)) {
         message = "Waiting for input... (q quits)";
     } else if (!message && p->count) {
@@ -274,7 +337,13 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
     } else if (!message) {
         char name[SEARCH_SIZE + 1];
         view_label(name, sizeof(name), p->width, p->label);
-        snprintf(out, cap, "%s", name);
+        if (p->file_count > 1) {
+            snprintf(text, sizeof(text), "(file %zu of %zu) %s",
+                     p->file_index + 1, p->file_count, name);
+            view_label(out, cap, p->width, text);
+        } else {
+            snprintf(out, cap, "%s", name);
+        }
         return;
     }
     if (p->prompt == FIND_FORWARD || p->prompt == FIND_BACKWARD) {
@@ -296,8 +365,12 @@ static int paint(struct pager *p)
     int state = build_page(p, &end);
     if (state == VIEW_ERROR)
         return -1;
-    bool final = state == VIEW_EOF && p->next.document;
-    if (final && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
+    bool at_last_file = p->file_index + 1 >= p->file_count;
+    bool eof_doc = state == VIEW_EOF && p->next.document;
+    bool final = eof_doc && !p->following && !p->hold_eof && at_last_file;
+    if (eof_doc && !p->following && !at_last_file && !p->message)
+        p->message = "End of file (:n next, q quit)";
+    if (eof_doc && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
         if (p->next.count == 0 && p->top.byte > 0) {
             off_t size = source_size(p->source);
             if (size < 0)
@@ -375,38 +448,302 @@ static int paint(struct pager *p)
     return 0;
 }
 
-static unsigned char pattern_byte(const struct search *s, size_t index)
+static void save_jump_mark(struct pager *p)
 {
-    return s->term[s->direction > 0 ? index : s->length - 1 - index];
+    p->marks[MARK_PREV] = (struct mark){
+        .set = true,
+        .file = p->file_index,
+        .pos = p->top,
+        .h_offset = p->h_offset
+    };
+}
+
+static int mark_index(int c)
+{
+    if (c >= 'a' && c <= 'z')
+        return c - 'a';
+    if (c >= 'A' && c <= 'Z')
+        return 26 + (c - 'A');
+    if (c == '\'')
+        return MARK_PREV;
+    return -1;
+}
+
+static int switch_file(struct pager *p, size_t target)
+{
+    if (target >= p->file_count) {
+        p->message = "No such file";
+        return -1;
+    }
+    if (target == p->file_index)
+        return 0;
+
+    struct file_entry *cur = &p->files[p->file_index];
+    cur->top = p->top;
+    cur->h_offset = p->h_offset;
+
+    struct file_entry *dst = &p->files[target];
+    if (!dst->opened) {
+        if (!strcmp(dst->path, "-")) {
+            p->message = "Cannot reopen standard input";
+            return -1;
+        }
+        int fd = open(dst->path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0) {
+            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
+                     dst->path, strerror(errno));
+            p->message = p->message_buf;
+            return -1;
+        }
+        struct stat st;
+        if (fstat(fd, &st) < 0) {
+            int err = errno;
+            close(fd);
+            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
+                     dst->path, strerror(err));
+            p->message = p->message_buf;
+            return -1;
+        }
+        if (!S_ISREG(st.st_mode)) {
+            close(fd);
+            int err = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
+                     dst->path, strerror(err));
+            p->message = p->message_buf;
+            return -1;
+        }
+        if (source_open(&dst->source, fd) < 0) {
+            int err = errno;
+            close(fd);
+            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
+                     dst->path, strerror(err));
+            p->message = p->message_buf;
+            return -1;
+        }
+        dst->fd = fd;
+        dst->own_fd = true;
+        dst->opened = true;
+    }
+
+    p->file_index = target;
+    p->source = &dst->source;
+    p->top = dst->top;
+    p->h_offset = dst->h_offset;
+    p->label = dst->path;
+    p->message = NULL;
+    p->search.hit = -1;
+    p->following = false;
+    p->hold_eof = false;
+    p->job = IDLE;
+    p->current.valid = false;
+    p->dirty = true;
+    return align(p, p->top, &p->top);
+}
+
+static bool compile_regex(struct pager *p, const char *pattern)
+{
+    regex_t re;
+    int rc = regcomp(&re, pattern, REG_EXTENDED | REG_NEWLINE);
+    if (rc != 0) {
+        char err[256];
+        regerror(rc, &re, err, sizeof(err));
+        snprintf(p->message_buf, sizeof(p->message_buf),
+                 "Invalid pattern: %s", err);
+        p->message = p->message_buf;
+        return false;
+    }
+    if (p->search.valid)
+        regfree(&p->search.regex);
+    p->search.regex = re;
+    p->search.valid = true;
+    return true;
 }
 
 static void start_search(struct pager *p, int direction, bool repeat)
 {
     struct search *s = &p->search;
     p->message = NULL;
-    if (!s->length) {
+    if (!s->valid) {
         p->message = "No previous search";
         return;
     }
     s->direction = direction;
-    s->matched = 0;
-    s->prefix[0] = 0;
-    for (size_t i = 1, j = 0; i < s->length; i++) {
-        while (j && pattern_byte(s, i) != pattern_byte(s, j))
-            j = s->prefix[j - 1];
-        if (pattern_byte(s, i) == pattern_byte(s, j))
-            j++;
-        s->prefix[i] = j;
-    }
 
     off_t anchor = repeat && s->hit >= 0 ? s->hit : p->top.byte;
-    // In a reverse repeat, allow an overlapping hit that starts earlier.
-    if (repeat && s->hit >= 0)
-        anchor += direction > 0 ? 1 : (off_t)s->length - 2;
-    else if (direction < 0)
-        anchor--;
-    p->cursor = (struct position){.byte = anchor};
+    if (repeat && s->hit >= 0 && direction > 0)
+        anchor++;
+    s->anchor = anchor;
+    s->first_line = true;
+    off_t start = line_start(p->source, anchor);
+    if (start < 0)
+        start = 0;
+    p->cursor = (struct position){.byte = start};
     p->job = SEARCH;
+}
+
+static int read_logical_line(struct pager *p, off_t start,
+                             size_t *out_len, off_t *next_line)
+{
+    struct search *find = &p->search;
+    size_t len = 0;
+    off_t pos = start;
+    for (;;) {
+        int b = source_byte(p->source, pos);
+        if (b == VIEW_WAIT || b == VIEW_ERROR)
+            return b;
+        if (b == VIEW_EOF) {
+            if (pos == start)
+                return VIEW_EOF;
+            *next_line = pos;
+            break;
+        }
+        pos++;
+        if (b == '\n') {
+            if (len > 0 && find->line[len - 1] == '\r')
+                len--;
+            *next_line = pos;
+            break;
+        }
+        if (len + 1 >= find->line_cap) {
+            size_t new_cap = find->line_cap ? find->line_cap * 2 : 4096;
+            if (new_cap > LINE_BUF_MAX)
+                new_cap = LINE_BUF_MAX;
+            if (len + 1 >= new_cap) {
+                // Truncate very long binary lines for regex matching.
+                continue;
+            }
+            char *grown = realloc(find->line, new_cap);
+            if (!grown)
+                return VIEW_ERROR;
+            find->line = grown;
+            find->line_cap = new_cap;
+        }
+        find->line[len++] = b == 0 ? 1 : (char)b;
+    }
+    if (!find->line) {
+        find->line = malloc(1);
+        if (!find->line)
+            return VIEW_ERROR;
+        find->line_cap = 1;
+    }
+    find->line[len] = '\0';
+    *out_len = len;
+    return VIEW_ROW;
+}
+
+static bool match_forward(regex_t *re, const char *line, size_t len,
+                          size_t min_col, size_t *match_col)
+{
+    size_t pos = 0;
+    while (pos <= len) {
+        regmatch_t m;
+        int flags = pos > 0 ? REG_NOTBOL : 0;
+        if (regexec(re, line + pos, 1, &m, flags) != 0)
+            return false;
+        size_t start = pos + (size_t)m.rm_so;
+        if (start >= min_col) {
+            *match_col = start;
+            return true;
+        }
+        pos = start + 1;
+    }
+    return false;
+}
+
+static bool match_backward(regex_t *re, const char *line, size_t len,
+                           size_t max_col, size_t *match_col)
+{
+    bool found = false;
+    size_t pos = 0;
+    while (pos <= len && pos < max_col) {
+        regmatch_t m;
+        int flags = pos > 0 ? REG_NOTBOL : 0;
+        if (regexec(re, line + pos, 1, &m, flags) != 0)
+            break;
+        size_t start = pos + (size_t)m.rm_so;
+        if (start >= max_col)
+            break;
+        *match_col = start;
+        found = true;
+        pos = start + 1;
+    }
+    return found;
+}
+
+static int step_search(struct pager *p)
+{
+    struct search *find = &p->search;
+    for (int lines = 0; lines < 64; lines++) {
+        if (find->direction < 0 && find->first_line &&
+            find->anchor == p->cursor.byte) {
+            if (p->cursor.byte == 0) {
+                p->message = "Pattern not found";
+                p->job = IDLE;
+                p->dirty = true;
+                return VIEW_ROW;
+            }
+            off_t prev = line_start(p->source, p->cursor.byte - 1);
+            if (prev < 0)
+                return VIEW_ERROR;
+            p->cursor.byte = prev;
+            find->first_line = false;
+            find->anchor = -1;
+        }
+
+        size_t len = 0;
+        off_t next_line = 0;
+        int rc = read_logical_line(p, p->cursor.byte, &len, &next_line);
+        if (rc == VIEW_WAIT || rc == VIEW_ERROR)
+            return rc;
+        if (rc == VIEW_EOF) {
+            p->message = "Pattern not found";
+            p->job = IDLE;
+            p->dirty = true;
+            return VIEW_ROW;
+        }
+
+        size_t match_col = 0;
+        bool matched = false;
+        if (find->direction > 0) {
+            size_t min_col = find->first_line && find->anchor > p->cursor.byte
+                             ? (size_t)(find->anchor - p->cursor.byte) : 0;
+            matched = match_forward(&find->regex, find->line, len,
+                                    min_col, &match_col);
+        } else {
+            size_t max_col = find->first_line && find->anchor >= 0
+                             ? (size_t)(find->anchor - p->cursor.byte)
+                             : SIZE_MAX;
+            matched = match_backward(&find->regex, find->line, len,
+                                     max_col, &match_col);
+        }
+
+        if (matched) {
+            save_jump_mark(p);
+            find->hit = p->cursor.byte + (off_t)match_col;
+            struct position hit = {.byte = find->hit};
+            if (align(p, hit, &p->top) < 0)
+                return VIEW_ERROR;
+            p->job = IDLE;
+            p->dirty = true;
+            return VIEW_ROW;
+        }
+
+        find->first_line = false;
+        if (find->direction > 0) {
+            p->cursor.byte = next_line;
+        } else if (p->cursor.byte == 0) {
+            p->message = "Pattern not found";
+            p->job = IDLE;
+            p->dirty = true;
+            return VIEW_ROW;
+        } else {
+            off_t prev = line_start(p->source, p->cursor.byte - 1);
+            if (prev < 0)
+                return VIEW_ERROR;
+            p->cursor.byte = prev;
+        }
+    }
+    return VIEW_ROW;
 }
 
 static int last_page(struct pager *p, struct position end)
@@ -422,9 +759,10 @@ static int step_job(struct pager *p)
     if (p->job == GO_END) {
         if (!s->eof)
             return VIEW_WAIT;
-        off_t size = source_size(s);
-        if (size < 0)
+        off_t size = 0;
+        if (source_refresh(s, &size) < 0)
             return VIEW_ERROR;
+        p->follow_size = size;
         if (size || s->spool)
             return last_page(p, (struct position){.byte = size}) < 0
                        ? VIEW_ERROR : VIEW_ROW;
@@ -434,7 +772,8 @@ static int step_job(struct pager *p)
     if (p->job == ADVANCE) {
         for (; p->remaining; p->remaining--) {
             struct position next;
-            int result = view_row(s, p->cursor, p->width, NULL, &next);
+            int result = view_row_h(s, p->cursor, p->width,
+                                    p->h_offset, p->chop, NULL, &next);
             if (result == VIEW_EOF)
                 return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
             if (result != VIEW_ROW)
@@ -455,38 +794,20 @@ static int step_job(struct pager *p)
         return VIEW_ROW;
     }
 
+    if (p->job == SEARCH)
+        return step_search(p);
+
     for (int i = 0; i < VIEW_BLOCK; i++) {
         off_t offset = p->cursor.byte;
         int b = offset < 0 ? VIEW_EOF : source_byte(s, offset);
         if (b == VIEW_WAIT || b == VIEW_ERROR)
             return b;
-        if (p->job == SEARCH) {
-            struct search *find = &p->search;
-            if (b == VIEW_EOF) {
-                p->message = "Pattern not found";
-                break;
-            }
-            while (find->matched && b != pattern_byte(find, find->matched))
-                find->matched = find->prefix[find->matched - 1];
-            if (b == pattern_byte(find, find->matched))
-                find->matched++;
-            if (find->matched == find->length) {
-                find->hit = find->direction > 0
-                            ? offset - (off_t)find->length + 1 : offset;
-                struct position hit = {.byte = find->hit};
-                if (align(p, hit, &p->top) < 0)
-                    return VIEW_ERROR;
-                break;
-            }
-            p->cursor.byte += find->direction;
-        } else {
-            if (b == VIEW_EOF)
-                return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
-            p->cursor.byte++;
-            if (p->job == GO_LINE && b == '\n' && --p->remaining == 0) {
-                p->top = p->cursor;
-                break;
-            }
+        if (b == VIEW_EOF)
+            return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+        p->cursor.byte++;
+        if (p->job == GO_LINE && b == '\n' && --p->remaining == 0) {
+            p->top = p->cursor;
+            break;
         }
         if (i == VIEW_BLOCK - 1)
             return VIEW_ROW;
@@ -504,13 +825,11 @@ static void edit_query(struct pager *p, tam_key_event_t key)
         p->prompt = COMMAND;
     } else if (key.type == TAM_KEY_ENTER) {
         int direction = p->prompt == FIND_FORWARD ? 1 : -1;
-        if (p->query_length) {
-            memcpy(p->search.term, p->query, p->query_length);
-            p->search.length = p->query_length;
-        }
+        p->prompt = COMMAND;
+        if (p->query_length && !compile_regex(p, p->query))
+            return;
         p->search.original_direction = direction;
         p->search.hit = -1;
-        p->prompt = COMMAND;
         start_search(p, direction, false);
     } else if (key.type == TAM_KEY_BACKSPACE && p->query_length) {
         do {
@@ -526,6 +845,96 @@ static void edit_query(struct pager *p, tam_key_event_t key)
         }
     }
     p->query[p->query_length] = '\0';
+}
+
+static int handle_mark_prompt(struct pager *p, tam_key_event_t key, int c,
+                              bool ctrl_c)
+{
+    enum prompt mode = p->prompt;
+    p->prompt = COMMAND;
+    if (ctrl_c || key.type == TAM_KEY_ESC)
+        return 0;
+
+    int idx = mark_index(c);
+    if (mode == MARK_SET) {
+        if (idx < 0 || idx == MARK_PREV) {
+            p->message = "Invalid mark";
+            return 0;
+        }
+        p->marks[idx] = (struct mark){
+            .set = true,
+            .file = p->file_index,
+            .pos = p->top,
+            .h_offset = p->h_offset
+        };
+        return 0;
+    }
+
+    if (idx < 0) {
+        p->message = "Invalid mark";
+        return 0;
+    }
+    struct mark target = p->marks[idx];
+    if (!target.set) {
+        p->message = "Mark not set";
+        return 0;
+    }
+    save_jump_mark(p);
+    if (target.file != p->file_index && switch_file(p, target.file) < 0)
+        return 0;
+    p->top = target.pos;
+    p->h_offset = target.h_offset;
+    p->current.valid = false;
+    p->search.hit = -1;
+    return align(p, p->top, &p->top);
+}
+
+static void handle_colon_prompt(struct pager *p, tam_key_event_t key, int c,
+                                bool ctrl_c)
+{
+    uint64_t count = p->count;
+    p->count = 0;
+    p->prompt = COMMAND;
+    if (ctrl_c || key.type == TAM_KEY_ESC)
+        return;
+
+    if (c == 'n') {
+        size_t step = count ? (size_t)count : 1;
+        if (p->file_index + step >= p->file_count || count > SIZE_MAX) {
+            p->message = "No next file";
+            return;
+        }
+        (void)switch_file(p, p->file_index + step);
+    } else if (c == 'p') {
+        size_t step = count ? (size_t)count : 1;
+        if (step > p->file_index || count > SIZE_MAX) {
+            p->message = "No previous file";
+            return;
+        }
+        (void)switch_file(p, p->file_index - step);
+    } else if (c == 'x') {
+        size_t target = count ? (size_t)(count - 1) : 0;
+        if (target >= p->file_count || count > SIZE_MAX) {
+            p->message = "No such file";
+            return;
+        }
+        (void)switch_file(p, target);
+    } else if (c == 'f') {
+        char name[SEARCH_SIZE + 1];
+        view_label(name, sizeof(name), p->width, p->label);
+        if (p->file_count > 1) {
+            snprintf(p->message_buf, sizeof(p->message_buf),
+                     "file %zu of %zu: %s", p->file_index + 1,
+                     p->file_count, name);
+        } else {
+            snprintf(p->message_buf, sizeof(p->message_buf), "%s", name);
+        }
+        p->message = p->message_buf;
+    } else if (c == 'q') {
+        p->quit = true;
+    } else {
+        p->message = "Unknown command";
+    }
 }
 
 static int handle_key(struct pager *p, tam_key_event_t key)
@@ -545,6 +954,12 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->quit = c == 'q';
         return 0;
     }
+    if (p->prompt == MARK_SET || p->prompt == MARK_GOTO)
+        return handle_mark_prompt(p, key, c, ctrl_c);
+    if (p->prompt == COLON) {
+        handle_colon_prompt(p, key, c, ctrl_c);
+        return 0;
+    }
     if (p->prompt != COMMAND) {
         edit_query(p, key);
         return 0;
@@ -554,39 +969,66 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         return 0;
     }
     if (ctrl_c || key.type == TAM_KEY_ESC) {
-        if (p->job != IDLE) {
+        if (p->following) {
+            p->following = false;
+            p->hold_eof = true;
+            p->job = IDLE;
+            p->message = "Follow stopped";
+        } else if (p->job != IDLE) {
             p->job = IDLE;
             p->message = "Canceled";
         }
         p->count = 0;
         return 0;
     }
-    if (p->job != IDLE)
+    if (p->job != IDLE || p->following)
         return 0;
 
+    p->hold_eof = false;
     p->message = NULL;
     if (c >= '0' && c <= '9') {
         if (p->count <= (UINT64_MAX - (unsigned)(c - '0')) / 10)
             p->count = p->count * 10 + (unsigned)(c - '0');
         return 0;
     }
+    if (c == ':') {
+        p->prompt = COLON;
+        return 0;
+    }
 
     uint64_t count = p->count;
     p->count = 0;
     int movement = 0;
-    if (key.type == TAM_KEY_DOWN || key.type == TAM_KEY_ENTER || c == 'j')
+    if (key.type == TAM_KEY_DOWN || key.type == TAM_KEY_ENTER || c == 'j') {
         movement = 1;
-    else if (key.type == TAM_KEY_UP || c == 'k')
+    } else if (key.type == TAM_KEY_UP || c == 'k') {
         movement = -1;
-    else if (key.type == TAM_KEY_PAGE_DOWN || c == ' ')
+    } else if (key.type == TAM_KEY_PAGE_DOWN || c == ' ') {
         movement = p->height;
-    else if (key.type == TAM_KEY_PAGE_UP || c == 'b')
+    } else if (key.type == TAM_KEY_PAGE_UP || c == 'b') {
         movement = -p->height;
-    else if (c == 'd')
+    } else if (c == 'd') {
         movement = (p->height + 1) / 2;
-    else if (c == 'u')
+    } else if (c == 'u') {
         movement = -(p->height + 1) / 2;
-    else if (c == 'g' || key.type == TAM_KEY_HOME) {
+    } else if (key.type == TAM_KEY_RIGHT || key.type == TAM_KEY_LEFT) {
+        int step = count && count <= (uint64_t)INT_MAX
+                   ? (int)count : (p->width > 1 ? p->width / 2 : 1);
+        if (key.type == TAM_KEY_RIGHT) {
+            p->h_offset = p->h_offset > INT_MAX - step
+                          ? INT_MAX : p->h_offset + step;
+        } else {
+            p->h_offset = p->h_offset > step ? p->h_offset - step : 0;
+        }
+        p->current.valid = false;
+        return align(p, p->top, &p->top);
+    } else if (c == 'S') {
+        p->chop = !p->chop;
+        p->current.valid = false;
+        p->message = p->chop ? "Chop long lines" : "Wrap long lines";
+        return align(p, p->top, &p->top);
+    } else if (c == 'g' || key.type == TAM_KEY_HOME) {
+        save_jump_mark(p);
         p->search.hit = -1;
         p->cursor = (struct position){0};
         if (count > 1 && c == 'g') {
@@ -596,8 +1038,18 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             p->top = p->cursor;
         }
     } else if (c == 'G' || key.type == TAM_KEY_END) {
+        save_jump_mark(p);
         p->cursor = (struct position){0};
         p->job = GO_END;
+    } else if (c == 'F') {
+        save_jump_mark(p);
+        p->following = true;
+        p->cursor = (struct position){0};
+        p->job = GO_END;
+    } else if (c == 'm') {
+        p->prompt = MARK_SET;
+    } else if (c == '\'') {
+        p->prompt = MARK_GOTO;
     } else if (c == '/' || c == '?') {
         p->query_length = 0;
         p->query[0] = '\0';
@@ -716,24 +1168,38 @@ static int run(struct pager *p, int wake)
             tam_key_init(&p->keys);
 
         bool pump = !p->source->eof &&
-                    (p->waiting || job_state == VIEW_WAIT);
+                    (p->waiting || job_state == VIEW_WAIT || p->following);
         struct pollfd fds[] = {
             {.fd = wake, .events = POLLIN},
             {.fd = p->tty.in_fd, .events = POLLIN},
             {.fd = pump ? p->source->input : -1, .events = POLLIN}
         };
         bool scanning = p->job != IDLE && job_state != VIEW_WAIT;
-        int timeout = scanning ? 0 : tam_key_pending(&p->keys) ? 50 : -1;
+        int timeout = scanning ? 0
+                    : tam_key_pending(&p->keys) ? 50
+                    : (p->following && !p->source->spool) ? 250 : -1;
         int n = poll(fds, sizeof(fds) / sizeof(fds[0]), timeout);
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0)
             return -1;
         if (n == 0 && !scanning) {
-            int got_key = tam_key_timeout(&p->keys, &key);
-            tam_key_init(&p->keys);
-            if (got_key > 0 && handle_key(p, key) < 0)
-                return -1;
+            if (tam_key_pending(&p->keys)) {
+                int got_key = tam_key_timeout(&p->keys, &key);
+                tam_key_init(&p->keys);
+                if (got_key > 0 && handle_key(p, key) < 0)
+                    return -1;
+            }
+            if (p->following && !p->source->spool && p->job == IDLE) {
+                off_t new_size = 0;
+                if (source_refresh(p->source, &new_size) == 0 &&
+                    new_size != p->follow_size) {
+                    p->follow_size = new_size;
+                    if (new_size < p->top.byte)
+                        p->top = (struct position){0};
+                    p->job = GO_END;
+                }
+            }
         }
         if (fds[0].revents) {
             char bytes[64];
@@ -749,7 +1215,9 @@ static int run(struct pager *p, int wake)
         if (fds[2].revents) {
             if (source_pump(p->source) < 0)
                 return -1;
-            if (p->waiting) {
+            if (p->following) {
+                p->job = GO_END;
+            } else if (p->waiting) {
                 p->dirty = true;
                 p->scroll = true;
             }
@@ -767,15 +1235,66 @@ static int run(struct pager *p, int wake)
     return p->result;
 }
 
-int view_interactive(struct source *s, int tty, const char *label)
+static int dump_inputs(struct file_entry *files, size_t count)
 {
-    struct pager p = {.source = s, .label = label, .dirty = true};
+    int result = view_dump(&files[0].source, 80);
+    for (size_t i = 1; result == 0 && i < count; i++) {
+        int fd = open(files[i].path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        if (fd < 0)
+            return -1;
+        struct source s;
+        if (source_open(&s, fd) < 0) {
+            int err = errno;
+            close(fd);
+            errno = err;
+            return -1;
+        }
+        result = view_dump(&s, 80);
+        int err = errno;
+        source_close(&s);
+        close(fd);
+        errno = err;
+    }
+    return result;
+}
+
+int view_interactive(const struct view_input *inputs, size_t count, int tty)
+{
+    struct file_entry *files = calloc(count, sizeof(*files));
+    if (!files)
+        return -1;
+    for (size_t i = 0; i < count; i++) {
+        files[i].path = inputs[i].path;
+        files[i].fd = inputs[i].fd;
+    }
+    if (source_open(&files[0].source, inputs[0].fd) < 0) {
+        int err = errno;
+        free(files);
+        errno = err;
+        return -1;
+    }
+    files[0].opened = true;
+
+    struct pager p = {
+        .source = &files[0].source,
+        .files = files,
+        .file_count = count,
+        .file_index = 0,
+        .label = files[0].path,
+        .dirty = true
+    };
     p.search.hit = -1;
     int wake[2] = {-1, -1};
     int result = -1;
     if (tam_tty_open(&p.tty, tty, STDOUT_FILENO) < 0 ||
-        !p.tty.interactive)
-        return view_dump(s, 80);
+        !p.tty.interactive) {
+        result = dump_inputs(files, count);
+        int err = errno;
+        source_close(&files[0].source);
+        free(files);
+        errno = err;
+        return result;
+    }
 
     // Job control belongs to the shell. A background pager must stop before
     // changing the settings on its controlling terminal.
@@ -784,9 +1303,9 @@ int view_interactive(struct source *s, int tty, const char *label)
         if (foreground == getpgrp())
             break;
         if (foreground < 0)
-            return -1;
+            goto cleanup;
         if (raise(SIGTTIN) != 0)
-            return -1;
+            goto cleanup;
     }
 
     if (size_view(&p) == 0 && signal_pipe(wake) == 0 &&
@@ -799,6 +1318,7 @@ int view_interactive(struct source *s, int tty, const char *label)
         }
     }
 
+cleanup:;
     int error = errno;
     if (tam_tty_raw(&p.tty, false) < 0 && result == 0) {
         result = -1;
@@ -809,7 +1329,17 @@ int view_interactive(struct source *s, int tty, const char *label)
     for (int i = 0; i < 2; i++)
         if (wake[i] >= 0)
             close(wake[i]);
+    if (p.search.valid)
+        regfree(&p.search.regex);
+    free(p.search.line);
     free(p.next.text);
+    for (size_t i = 0; i < count; i++) {
+        if (files[i].opened)
+            source_close(&files[i].source);
+        if (files[i].own_fd && files[i].fd >= 0)
+            close(files[i].fd);
+    }
+    free(files);
     errno = error;
     return result;
 }

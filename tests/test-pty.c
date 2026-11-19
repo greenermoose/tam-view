@@ -142,8 +142,8 @@ static void size(struct terminal *t, int rows, int cols)
     CHECK(ioctl(t->slave, TIOCSWINSZ, &ws) == 0);
 }
 
-static struct terminal start(const char *viewer, const char *path,
-                             int input, int producer)
+static struct terminal start_args(const char *viewer, const char *path1,
+                                  const char *path2, int input, int producer)
 {
     struct terminal t = {0};
     t.master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -169,11 +169,20 @@ static struct terminal start(const char *viewer, const char *path,
         if (input >= 0)
             close(input);
         CHECK(setenv("TERM", "linux", 1) == 0);
-        execl(viewer, viewer, path, (char *)NULL);
+        if (path2)
+            execl(viewer, viewer, path1, path2, (char *)NULL);
+        else
+            execl(viewer, viewer, path1, (char *)NULL);
         _exit(127);
     }
     active = t.child;
     return t;
+}
+
+static struct terminal start(const char *viewer, const char *path,
+                             int input, int producer)
+{
+    return start_args(viewer, path, NULL, input, producer);
 }
 
 static void restored(struct terminal *t)
@@ -251,16 +260,23 @@ int main(int argc, char **argv)
     expect(&t, 0, "03 three");
     send_key(&t, "u");
     expect(&t, 0, "01 one");
-    send_key(&t, "/needle.[x]\r");
+    send_key(&t, "/needle\\.\\[x\\]\r");
     expect(&t, 0, "07 needle.[x]");
     send_key(&t, "n");
     expect(&t, 0, "10 needle.[x]");
     send_key(&t, "N");
     expect(&t, 0, "07 needle.[x]");
+    send_key(&t, "ma");
     send_key(&t, "11g");
     expect(&t, 0, "11 eleven");
-    send_key(&t, "?needle.[x]\r");
+    send_key(&t, "'a");
+    expect(&t, 0, "07 needle.[x]");
+    send_key(&t, "''");
+    expect(&t, 0, "11 eleven");
+    send_key(&t, "?^10 needle\\.\r");
     expect(&t, 0, "10 needle.[x]");
+    send_key(&t, "/[unclosed\r");
+    expect(&t, 3, "Invalid pattern");
     send_key(&t, "/missing\r");
     expect(&t, 3, "Pattern not found");
     send_key(&t, "h");
@@ -351,6 +367,72 @@ int main(int argc, char **argv)
     CHECK(kill(t.child, SIGTERM) == 0);
     finish(&t, 128 + SIGTERM, 4);
     CHECK(contains(&t, 0, "one") && contains(&t, 3, "four"));
+    close_terminal(&t);
+
+    // Horizontal scrolling & chop toggle.
+    write_file(path, "01234567890123456789012345678901234567890123456789\n"
+                     "......................line2\n"
+                     "......................line3\n"
+                     "......................line4\n"
+                     "......................line5\n");
+    t = start(argv[1], path, -1, -1);
+    expect(&t, 0, "01234567890123456789012345678901234567890123");
+    send_key(&t, "\033[C");
+    expect(&t, 0, "2345678901234567890123456789");
+    expect(&t, 1, "line2");
+    send_key(&t, "\033[D");
+    expect(&t, 0, "01234567890123456789012345678901234567890123");
+    send_key(&t, "S");
+    expect(&t, 1, "......................line2");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+
+    // Multiple-file navigation.
+    char path2[] = "/tmp/tam-view-test2-XXXXXX";
+    int fd2 = mkstemp(path2);
+    CHECK(fd2 >= 0 && close(fd2) == 0);
+    write_file(path, "file1-a\nfile1-b\nfile1-c\nfile1-d\n");
+    write_file(path2, "file2-a\nfile2-b\nfile2-c\nfile2-d\n");
+    t = start_args(argv[1], path, path2, -1, -1);
+    expect(&t, 0, "file1-a");
+    expect(&t, 3, "(file 1 of 2)");
+    send_key(&t, " ");
+    expect(&t, 3, "End of file");
+    send_key(&t, ":n");
+    expect(&t, 0, "file2-a");
+    expect(&t, 3, "(file 2 of 2)");
+    send_key(&t, ":p");
+    expect(&t, 3, "End of file");
+    send_key(&t, "g");
+    expect(&t, 0, "file1-a");
+    send_key(&t, "2:x");
+    expect(&t, 0, "file2-a");
+    send_key(&t, ":f");
+    expect(&t, 3, "file 2 of 2:");
+    send_key(&t, " ");
+    finish(&t, 0, 3);
+    CHECK(contains(&t, 0, "file2-b") && contains(&t, 2, "file2-d"));
+    close_terminal(&t);
+    CHECK(unlink(path2) == 0);
+
+    // Follow mode on a growing file.
+    write_file(path, "log-1\nlog-2\nlog-3\nlog-4\n");
+    t = start(argv[1], path, -1, -1);
+    expect(&t, 0, "log-1");
+    send_key(&t, "F");
+    expect(&t, 2, "log-4");
+    expect(&t, 3, "Waiting for data");
+    fd = open(path, O_WRONLY | O_APPEND);
+    CHECK(fd >= 0);
+    CHECK(write(fd, "log-5\n", 6) == 6);
+    CHECK(close(fd) == 0);
+    expect(&t, 2, "log-5");
+    send_key(&t, "\003");
+    expect(&t, 3, "Follow stopped");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    CHECK(contains(&t, 2, "log-5"));
     close_terminal(&t);
 
     CHECK(unlink(path) == 0);

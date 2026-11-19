@@ -17,8 +17,10 @@ int source_open(struct source *s, int input)
         if (start < 0)
             return -1;
         // An already-positioned stdin must start at its current byte.
-        if (start == 0)
+        if (start == 0) {
+            s->size = st.st_size;
             return 0;
+        }
         s->eof = false;
     }
 
@@ -101,4 +103,22 @@ off_t source_size(struct source *s)
     if (s->spool)
         return s->size;
     return fstat(s->fd, &st) == 0 ? st.st_size : -1;
+}
+
+int source_refresh(struct source *s, off_t *new_size)
+{
+    if (s->spool) {
+        *new_size = s->size;
+        return 0;
+    }
+    struct stat st;
+    if (fstat(s->fd, &st) < 0)
+        return -1;
+    if (st.st_size != s->size) {
+        s->block = -1;
+        s->used = 0;
+        s->size = st.st_size;
+    }
+    *new_size = st.st_size;
+    return 0;
 }

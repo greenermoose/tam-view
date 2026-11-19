@@ -73,77 +73,189 @@ size_t view_row_capacity(int width)
     return (size_t)width * 4 * (1 + MAX_MARKS) + 1;
 }
 
-int view_row(struct source *s, struct position start, int width,
-             char *out, struct position *next)
+int view_row_h(struct source *s, struct position start, int width,
+               int skip, bool chop, char *out, struct position *next)
 {
-    struct position p = start;
+    if (skip == 0 && !chop) {
+        struct position p = start;
+        int cells = 0;
+        unsigned marks = 0;
+        size_t used = 0;
+
+        for (;;) {
+            uint32_t cp;
+            int count = 0;
+            bool tab = p.tab_left > 0;
+            if (tab) {
+                cp = ' ';
+            } else {
+                int b = source_byte(s, p.byte);
+                if (b == VIEW_EOF) {
+                    if (position_equal(p, start))
+                        return VIEW_EOF;
+                    break;
+                }
+                if (b < 0)
+                    return b;
+
+                if (b == '\r') {
+                    int after = source_byte(s, p.byte + 1);
+                    if (after == VIEW_ERROR || after == VIEW_WAIT)
+                        return after;
+                    if (after == '\n') {
+                        b = '\n';
+                        p.byte++;
+                    }
+                }
+                if (b == '\n') {
+                    p.byte++;
+                    p.tab_column = 0;
+                    break;
+                }
+                if (b == '\t') {
+                    p.byte++;
+                    p.tab_left = TAB_SIZE - p.tab_column;
+                    continue;
+                }
+                count = decode(s, p.byte, b, &cp);
+                if (count < 0)
+                    return count;
+            }
+
+            struct glyph g = glyph(cp, width);
+            if (g.width == 0 && (cells == 0 || marks >= MAX_MARKS))
+                g = (struct glyph){.bytes = "?", .len = 1, .width = 1};
+            if (g.width > width - cells)
+                break;
+            p.byte += count;
+            if (tab)
+                p.tab_left--;
+            p.tab_column = (unsigned char)((p.tab_column + g.width) % TAB_SIZE);
+            if (g.width != 0)
+                marks = 0;
+            else
+                marks++;
+            cells += g.width;
+            if (out) {
+                memcpy(out + used, g.bytes, g.len);
+                used += g.len;
+            }
+        }
+        if (out)
+            out[used] = '\0';
+        *next = p;
+        return VIEW_ROW;
+    }
+
+    struct position p = {.byte = start.byte};
+    int col = 0;
     int cells = 0;
     unsigned marks = 0;
     size_t used = 0;
 
     for (;;) {
-        uint32_t cp;
-        int count = 0;
-        bool tab = p.tab_left > 0;
-        if (tab) {
-            cp = ' ';
-        } else {
-            int b = source_byte(s, p.byte);
-            if (b == VIEW_EOF) {
-                if (position_equal(p, start))
-                    return VIEW_EOF;
-                break;
-            }
-            if (b < 0)
-                return b;
+        int b = source_byte(s, p.byte);
+        if (b == VIEW_EOF) {
+            if (p.byte == start.byte)
+                return VIEW_EOF;
+            break;
+        }
+        if (b < 0)
+            return b;
 
-            if (b == '\r') {
-                int after = source_byte(s, p.byte + 1);
-                if (after == VIEW_ERROR || after == VIEW_WAIT)
-                    return after;
-                if (after == '\n') {
-                    b = '\n';
-                    p.byte++;
+        if (b == '\r') {
+            int after = source_byte(s, p.byte + 1);
+            if (after == VIEW_ERROR || after == VIEW_WAIT)
+                return after;
+            if (after == '\n') {
+                b = '\n';
+                p.byte++;
+            }
+        }
+        if (b == '\n') {
+            p.byte++;
+            break;
+        }
+        if (b == '\t') {
+            p.byte++;
+            int tab_w = TAB_SIZE - (col % TAB_SIZE);
+            int start_c = col;
+            int end_c = col + tab_w;
+            col = end_c;
+            if (end_c > skip && cells < width) {
+                int vis_start = start_c > skip ? start_c : skip;
+                int vis_end = end_c < skip + width ? end_c : skip + width;
+                int spaces = vis_end - vis_start;
+                if (spaces > width - cells)
+                    spaces = width - cells;
+                if (out) {
+                    memset(out + used, ' ', (size_t)spaces);
+                    used += (size_t)spaces;
                 }
+                cells += spaces;
+                marks = 0;
             }
-            if (b == '\n') {
-                p.byte++;
-                p.tab_column = 0;
-                break;
-            }
-            if (b == '\t') {
-                p.byte++;
-                p.tab_left = TAB_SIZE - p.tab_column;
-                continue;
-            }
-            count = decode(s, p.byte, b, &cp);
-            if (count < 0)
-                return count;
+            continue;
         }
 
-        struct glyph g = glyph(cp, width);
-        if (g.width == 0 && (cells == 0 || marks >= MAX_MARKS))
-            g = (struct glyph){.bytes = "?", .len = 1, .width = 1};
-        if (g.width > width - cells)
-            break;
+        uint32_t cp;
+        int count = decode(s, p.byte, b, &cp);
+        if (count < 0)
+            return count;
         p.byte += count;
-        if (tab)
-            p.tab_left--;
-        p.tab_column = (unsigned char)((p.tab_column + g.width) % TAB_SIZE);
-        if (g.width != 0)
+
+        struct glyph g = glyph(cp, width);
+        if (g.width == 0) {
+            if (col < skip || cells >= width)
+                continue;
+            if (cells == 0 || marks >= MAX_MARKS)
+                g = (struct glyph){.bytes = "?", .len = 1, .width = 1};
+        }
+
+        int start_c = col;
+        int end_c = col + g.width;
+        col = end_c;
+
+        if (cells >= width)
+            continue;
+        if (end_c <= skip)
+            continue;
+        if (start_c < skip && end_c > skip) {
+            int spaces = end_c - skip;
+            if (spaces > width - cells)
+                spaces = width - cells;
+            if (out) {
+                memset(out + used, ' ', (size_t)spaces);
+                used += (size_t)spaces;
+            }
+            cells += spaces;
             marks = 0;
-        else
-            marks++;
-        cells += g.width;
+            continue;
+        }
+        if (g.width > width - cells) {
+            cells = width;
+            continue;
+        }
         if (out) {
             memcpy(out + used, g.bytes, g.len);
             used += g.len;
         }
+        cells += g.width;
+        if (g.width != 0)
+            marks = 0;
+        else
+            marks++;
     }
     if (out)
         out[used] = '\0';
     *next = p;
     return VIEW_ROW;
+}
+
+int view_row(struct source *s, struct position start, int width,
+             char *out, struct position *next)
+{
+    return view_row_h(s, start, width, 0, false, out, next);
 }
 
 void view_label(char *out, size_t cap, int width, const char *text)

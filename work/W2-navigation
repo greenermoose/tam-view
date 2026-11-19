@@ -1,0 +1,33 @@
+W2 NAVIGATION COMMANDS (0.1.0)
+
+Date: 2026-11-19
+AI harness: Antigravity CLI
+AI model: Gemini 4 Hydrogen (Medium)
+
+GUIDANCE
+
+  Fred: "/plan Do the next slice of work on tam-view."
+  Confirmed:
+  1. Multi-file EOF stays open on non-final files (:n next, q quit) and
+     exits at EOF of the final file.
+  2. Horizontal scrolling uses un-wrapped slicing when h_offset > 0 or S
+     chop mode is active; returning h_offset to 0 restores wrapping unless
+     S is toggled on.
+  3. POSIX Extended Regular Expressions (REG_EXTENDED | REG_NEWLINE) for
+     / and ? searches.
+
+DONE
+
+  - Implemented POSIX regex search (<regex.h>) for /, ?, n, and N.
+  - Implemented marks (m<a-z/A-Z>, '<a-z/A-Z>, and '') across files.
+  - Implemented horizontal scrolling (Left/Right) and chop-long-lines (S)
+    in layout.c and pager.c.
+  - Implemented multiple-file navigation (:n, :p, :x, :f) and follow mode
+    (F, Ctrl-C/Esc stops following, q quits).
+  - Bumped VERSION to 0.1.0, updated README and help screen, and added
+    layout, PTY, and CLI tests.
+  - Passed make test, make sanitize, and ldd dependency check (libc only).
+
+HANDOFF
+
+  Proceed to 0.2.0 markup rendering in plans/P2-rendering.md.

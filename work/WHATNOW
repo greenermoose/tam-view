@@ -2,18 +2,17 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-18, with W1
+Updated: 2026-11-19, with W2
 
 STATE
 
-  0.0.1 on dev handles one text file or piped input, with backward
-  paging, literal search, and the prompt below the visible page.
+  0.1.0 on dev adds POSIX regex search, marks, horizontal scrolling
+  (with S chop toggle), multiple-file navigation, and follow mode while
+  preserving 0.0.1 primary-screen exit behavior.
 
 NEXT
 
-  1. Plan the 0.1.0 viewing commands in plans/P1-text-viewer.md and
-     check them on the same terminal and pipe paths as 0.0.1.
-  2. Keep the 0.2.x markup work in plans/P2-rendering.md.
+  1. Design and build the 0.2.x markup rendering mode in plans/P2-rendering.md.
 
 WAITING FOR FRED
 

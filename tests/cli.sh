@@ -16,6 +16,10 @@ cmp -- -dash output
 cmp -- -dash output
 cat ./-dash | "$bin" > output
 cmp -- -dash output
+printf 'second\n' > second
+cat ./-dash second > both
+"$bin" -- -dash second > output
+cmp both output
 
 if "$bin" --invalid 2> error || "$bin" absent 2> error ||
    "$bin" . 2> error || "$bin" one two 2> error; then

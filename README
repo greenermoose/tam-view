@@ -17,6 +17,7 @@ BUILD AND TRY
     make test
     make sanitize
     build/tam-view README
+    build/tam-view README ROADMAP.md
     printf 'one\ntwo\n' | build/tam-view
     build/tam-view --raw -- filename
 
@@ -31,12 +32,17 @@ KEYS
   Space, Page Down     Next page
   b, Page Up           Previous page
   d, u                 Half page down or up
+  Left, Right          Scroll horizontally
+  S                    Toggle chop long lines
   g, Home              Start
   G, End               Show the last page and return to the prompt
   Ng                   Go to file line N, for example 42g
-  /text, ?text         Find literal text forward or backward
+  m<a-z>, '<a-z>, ''   Set mark, go to mark, or return to previous position
+  /regex, ?regex       Find POSIX regex forward or backward
   n, N                 Repeat the search or reverse its direction
-  Esc, Ctrl-C          Cancel a search or pending movement
+  :n, :p, :x, :f       Next, previous, first, or current file in list
+  F                    Follow growing file or pipe (Ctrl-C stops)
+  Esc, Ctrl-C          Cancel a search, follow mode, or pending movement
   Ctrl-Z               Suspend and restore the shell's tty settings
   h                    Help
   q                    Quit and keep the visible text
