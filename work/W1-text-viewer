@@ -1,0 +1,47 @@
+W1 FIRST TEXT VIEWER
+
+Date: 2026-11-18
+AI harness: Codex CLI 0.170.0
+AI model: gpt-6.2-sol
+Commits: 9f59edb
+
+GUIDANCE
+
+  Fred: "Create a repo for tam-view, a file viewer, at [redacted: local
+  path]. See tam-idol for the folders to set up. Use less and more as
+  inspirations for a fast file viewer, but I want to add more
+  functionality. Start by recreating the functionality of less. Write
+  it in C with no dependencies other than the standard C library and
+  libtam. The first phase will be to create a reliable file viewer for
+  text files. Then we want to have modes to our viewing: raw mode
+  shows the text, but render mode shows what mermaid diagrams,
+  markdown, and HTML are intended to look like, interpreting the
+  markup to produce readable output without markup in a text
+  terminal, including both a kernel console and tam-last. By default
+  I want tam-view to show a file but when you get to the end of the
+  file or quit out of tam-view, don't clear the screen. Keep it
+  showing and just scroll up to take the user back to the command
+  prompt, the way more does (but less does not). That always irked me
+  about less -- its standard behavior clears the screen so I lose
+  what I was just viewing. I like more's standard behavior, but it
+  has fewer viewing options than less. There are other differences I
+  will add to tam-view, but this is enough to get started."
+  Fred: "I approve this plan. Proceed. Create the repo on GitHub once
+  you have it working locally."
+
+DONE
+
+  - Built 0.0.1 with core navigation and literal search.
+  - Passed Make tests, sanitizers, staged install and uninstall, and
+    the dependency check. Linked only libc dynamically.
+  - Confirmed both q and EOF on a Linux VGA console in a VM. Checked
+    screen cells with the tam-last parser and ran headless tam-last.
+
+FAILED
+
+  - The sandbox blocked LeakSanitizer and the headless Wayland socket.
+    Both checks passed outside the sandbox.
+
+HANDOFF
+
+  Expand the viewing commands in P1 before starting render mode.

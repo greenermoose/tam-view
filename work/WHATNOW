@@ -1,0 +1,25 @@
+WHATNOW
+
+Read this first at the start of a tam-view work session.
+
+Updated: 2026-11-18, with W1
+
+STATE
+
+  0.0.1 on dev handles one text file or piped input, with backward
+  paging, literal search, and the prompt below the visible page.
+
+NEXT
+
+  1. Plan the 0.1.0 viewing commands in plans/P1-text-viewer.md and
+     check them on the same terminal and pipe paths as 0.0.1.
+  2. Keep the 0.2.x markup work in plans/P2-rendering.md.
+
+WAITING FOR FRED
+
+  Nothing.
+
+WATCH OUT
+
+  EOF is an exit condition when the final page appears. Test both
+  EOF and q without clearing the screen or losing terminal settings.

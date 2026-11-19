@@ -1,0 +1,67 @@
+TAM-VIEW - A TERMINAL FILE VIEWER
+
+tam-view reads text files and piped input. It borrows its navigation
+from less and leaves the last page visible when you reach the end or
+press q. The shell prompt appears on the line below the text.
+
+Follows the tam-idol 0.1.0 standard.
+
+
+BUILD AND TRY
+
+  Needs a C11 compiler, Make, and the core libtam.a plus its headers.
+  LIBTAM_PREFIX defaults to $HOME/.local. The binary links libc and
+  the static libtam archive.
+
+    make
+    make test
+    make sanitize
+    build/tam-view README
+    printf 'one\ntwo\n' | build/tam-view
+    build/tam-view --raw -- filename
+
+  make install and make uninstall use PREFIX (default $HOME/.local).
+  DESTDIR lets a packager stage the files. make clean removes build/.
+
+
+KEYS
+
+  Down, j, Enter       Next display row
+  Up, k                Previous display row
+  Space, Page Down     Next page
+  b, Page Up           Previous page
+  d, u                 Half page down or up
+  g, Home              Start
+  G, End               Show the last page and return to the prompt
+  Ng                   Go to file line N, for example 42g
+  /text, ?text         Find literal text forward or backward
+  n, N                 Repeat the search or reverse its direction
+  Esc, Ctrl-C          Cancel a search or pending movement
+  Ctrl-Z               Suspend and restore the shell's tty settings
+  h                    Help
+  q                    Quit and keep the visible text
+
+  Searches are case-sensitive. Enter submits a query and Backspace
+  removes a character. Redirected output is a byte-for-byte copy.
+  The viewer uses the primary screen on the Linux console and
+  ANSI terminals such as tam-last. Scrollback, where available, is
+  maintained by the terminal.
+
+
+WHERE THINGS ARE
+
+  src/, include/   the pager, source access, and text layout
+  tests/           layout, pseudoterminal, and CLI checks
+  arch/            how input, layout, and display fit together
+  ideas/           behavior learned from less and more
+  plans/           text and markup milestones
+  bugs/, reviews/  numbered records
+  work/            WHATNOW and work session records
+  ROADMAP.md       versions and milestones
+  UPSTREAM.md      upstream code ledger
+  COPYRIGHT        copyright and license notices
+
+
+LICENSE
+
+  GNU General Public License, version 3 or later. See COPYRIGHT.
