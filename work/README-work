@@ -25,6 +25,11 @@ work/ keeps the useful parts, drops the paperwork, records what failed,
 and puts the next steps in one file, WHATNOW. Nothing indexes the
 records, and each record goes in a commit with the work.
 
+D278 ended the old arrangement on 2026-11-20. No live repository has a
+docs/ai/ folder. Records written before the 2026-11-17 cutover live in
+work/history/ unchanged apart from repaired links; they are read-only
+and are not indexed. New sessions use work/W<n>-<name> as below.
+
 THE PROCEDURE
 
 At the start of a session:

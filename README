@@ -4,7 +4,7 @@ tam-view reads text files and piped input. It borrows its navigation
 from less and leaves the last page visible when you reach the end or
 press q. The shell prompt appears on the line below the text.
 
-Follows the tam-idol 0.1.0 standard.
+Follows the tam-idol 0.2.0 standard.
 
 
 BUILD AND TRY
