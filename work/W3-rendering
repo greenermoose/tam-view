@@ -1,0 +1,45 @@
+W3 MARKUP AND MERMAID RENDERING (0.2.0)
+
+Date: 2026-11-21
+AI harness: Antigravity CLI
+AI model: Gemini 4 Hydrogen (Medium)
+
+GUIDANCE
+
+  Fred: "/plan Do the next work slice for tam-view."
+  Confirmed and refined:
+  1. Full 0.2.0: render pipeline, Markdown, HTML, Mermaid flowcharts,
+     and ASCII console layout (--ascii / TERM=linux).
+  2. Render mode is the default for interactive viewing (auto-detecting
+     .md/.html/.mmd and HTML/Mermaid content; plain text stays raw unless
+     forced); redirected stdout remains a byte-for-byte copy unless -R
+     or --render is passed.
+  3. CLI flags: -r/--raw, -R/--render, --ascii; R key toggles rendered
+     and raw mode inside the pager.
+  4. Plain structured terminal text (Unicode box-drawing or ASCII) so
+     layout.c sanitization, wrapping, and regex search carry over.
+
+DONE
+
+  - Added shared render buffer, word wrapping, box-drawing/ASCII charset,
+    table formatter, format detection, and tmpfile source output in
+    include/render_internal.h and src/render.c.
+  - Implemented Markdown renderer (headings, paragraphs, lists, blockquotes,
+    code blocks, embedded mermaid fenced blocks, links, horizontal rules,
+    and GFM pipe tables) in src/render_md.c.
+  - Implemented HTML renderer (headings, paragraphs, lists, pre/code,
+    links, blockquotes, tables, entity decoding, script/style/comment
+    skipping) in src/render_html.c.
+  - Implemented Mermaid flowchart renderer (TD/TB/BT/LR/RL, node shapes,
+    edge labels, cycle-safe layering, narrow-width TD fallback, and
+    unsupported diagram diagnostics) in src/render_mermaid.c.
+  - Integrated -r/--raw, -R/--render, --ascii, TERM=linux detection,
+    pager R toggle, and SIGWINCH re-rendering in src/main.c and src/pager.c.
+  - Bumped VERSION to 0.2.0, updated README and help screen, and added
+    render unit tests, PTY toggle tests, and CLI tests.
+  - Passed make test, make sanitize, and ldd dependency check (libc only).
+
+HANDOFF
+
+  0.2.0 rendering is ready on dev. Future 0.2.x refinements can extend
+  additional Mermaid diagram types or markup edge cases as needed.

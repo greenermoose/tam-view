@@ -9,7 +9,8 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
 CFLAGS ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 LIBTAM ?= $(LIBTAM_PREFIX)/lib/libtam.a
-OBJECTS = $(addprefix $(BUILD)/,main.o source.o layout.o pager.o)
+OBJECTS = $(addprefix $(BUILD)/,main.o source.o layout.o pager.o render.o render_md.o render_html.o render_mermaid.o)
+RENDER_OBJECTS = $(addprefix $(BUILD)/,render.o render_md.o render_html.o render_mermaid.o)
 
 all: $(BUILD)/tam-view
 
@@ -26,11 +27,15 @@ $(BUILD)/main.o: VERSION
 $(BUILD)/test-layout: tests/test-layout.c $(BUILD)/layout.o $(BUILD)/source.o $(LIBTAM)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
+$(BUILD)/test-render: tests/test-render.c $(RENDER_OBJECTS) $(BUILD)/source.o $(LIBTAM)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
+
 $(BUILD)/test-pty: tests/test-pty.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
-test: $(BUILD)/tam-view $(BUILD)/test-layout $(BUILD)/test-pty
+test: $(BUILD)/tam-view $(BUILD)/test-layout $(BUILD)/test-render $(BUILD)/test-pty
 	$(BUILD)/test-layout
+	$(BUILD)/test-render
 	$(BUILD)/test-pty $(BUILD)/tam-view
 	sh tests/cli.sh $(BUILD)/tam-view $(VERSION)
 

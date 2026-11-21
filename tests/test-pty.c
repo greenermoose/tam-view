@@ -435,6 +435,21 @@ int main(int argc, char **argv)
     CHECK(contains(&t, 2, "log-5"));
     close_terminal(&t);
 
+    // Render mode (-R) and R toggle to raw and back.
+    write_file(path, "# Heading\n\n- bullet\n\nline3\nline4\n");
+    t = start_args(argv[1], "-R", path, -1, -1);
+    expect(&t, 0, "Heading");
+    expect(&t, 1, "=======");
+    send_key(&t, "R");
+    expect(&t, 0, "# Heading");
+    expect(&t, 3, "Raw mode");
+    send_key(&t, "R");
+    expect(&t, 0, "Heading");
+    expect(&t, 3, "Render mode");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+
     CHECK(unlink(path) == 0);
     puts("PTY: ok");
     return 0;

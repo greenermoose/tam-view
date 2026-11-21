@@ -2,17 +2,19 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-19, with W2
+Updated: 2026-11-21, with W3
 
 STATE
 
-  0.1.0 on dev adds POSIX regex search, marks, horizontal scrolling
-  (with S chop toggle), multiple-file navigation, and follow mode while
-  preserving 0.0.1 primary-screen exit behavior.
+  0.2.0 on dev adds render mode by default for interactive markup viewing
+  (Markdown, HTML, and Mermaid flowcharts), with -r/--raw, -R/--render,
+  --ascii (auto on TERM=linux), and the R key toggle in the pager while
+  preserving 0.0.1/0.1.0 navigation, search, and primary-screen exit.
 
 NEXT
 
-  1. Design and build the 0.2.x markup rendering mode in plans/P2-rendering.md.
+  1. Review 0.2.0 rendered output on sample Markdown, HTML, and Mermaid
+     documents; install/package when Fred calls for the next stage.
 
 WAITING FOR FRED
 
@@ -20,5 +22,6 @@ WAITING FOR FRED
 
 WATCH OUT
 
-  EOF is an exit condition when the final page appears. Test both
-  EOF and q without clearing the screen or losing terminal settings.
+  Redirected stdout stays a byte-for-byte copy unless -R/--render is
+  explicitly passed. Slow pipes in auto-detect mode must not block on
+  prefix sniffing before non-blocking poll setup in pager.c.

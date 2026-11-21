@@ -17,6 +17,8 @@ BUILD AND TRY
     make test
     make sanitize
     build/tam-view README
+    build/tam-view -r README.md
+    build/tam-view -R --ascii ROADMAP.md
     build/tam-view README ROADMAP.md
     printf 'one\ntwo\n' | build/tam-view
     build/tam-view --raw -- filename
@@ -41,6 +43,7 @@ KEYS
   /regex, ?regex       Find POSIX regex forward or backward
   n, N                 Repeat the search or reverse its direction
   :n, :p, :x, :f       Next, previous, first, or current file in list
+  R                    Toggle rendered / raw view
   F                    Follow growing file or pipe (Ctrl-C stops)
   Esc, Ctrl-C          Cancel a search, follow mode, or pending movement
   Ctrl-Z               Suspend and restore the shell's tty settings

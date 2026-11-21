@@ -12,6 +12,8 @@ grep -F 'Usage: tam-view' help >/dev/null
 printf 'one\000two\033[2J\r\nthree' > ./-dash
 "$bin" --raw -- -dash > output
 cmp -- -dash output
+"$bin" -r -- -dash > output
+cmp -- -dash output
 "$bin" - < ./-dash > output
 cmp -- -dash output
 cat ./-dash | "$bin" > output
@@ -20,6 +22,16 @@ printf 'second\n' > second
 cat ./-dash second > both
 "$bin" -- -dash second > output
 cmp both output
+
+printf '# Heading\n\n* item\n' > sample.md
+"$bin" -R --ascii sample.md > md_out
+grep -F 'Heading' md_out >/dev/null
+grep -F '* item' md_out >/dev/null
+
+printf 'flowchart TD\nA[One] --> B[Two]\n' > sample.mmd
+"$bin" --render --ascii sample.mmd > mmd_out
+grep -F '| One |' mmd_out >/dev/null
+grep -F '| Two |' mmd_out >/dev/null
 
 if "$bin" --invalid 2> error || "$bin" absent 2> error ||
    "$bin" . 2> error || "$bin" one two 2> error; then

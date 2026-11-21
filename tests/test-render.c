@@ -1,0 +1,149 @@
+#include "render_internal.h"
+#include "view.h"
+
+#include <assert.h>
+#include <locale.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static char *render_str(enum view_format fmt, const char *input, int width, bool ascii)
+{
+    struct rbuf b;
+    rbuf_init(&b);
+    size_t len = strlen(input);
+    if (fmt == VIEW_FORMAT_MARKDOWN)
+        render_markdown(&b, input, len, width, ascii);
+    else if (fmt == VIEW_FORMAT_HTML)
+        render_html(&b, input, len, width, ascii);
+    else
+        render_mermaid(&b, input, len, width, ascii);
+    assert(!b.oom);
+    return b.data ? b.data : strdup("");
+}
+
+static void test_detect(void)
+{
+    assert(view_detect_format("doc.md", NULL, false) == VIEW_FORMAT_MARKDOWN);
+    assert(view_detect_format("page.HTML", NULL, false) == VIEW_FORMAT_HTML);
+    assert(view_detect_format("flow.mmd", NULL, false) == VIEW_FORMAT_MERMAID);
+    assert(view_detect_format("notes.txt", NULL, false) == VIEW_FORMAT_RAW);
+    assert(view_detect_format("notes.txt", NULL, true) == VIEW_FORMAT_MARKDOWN);
+
+    FILE *fp = tmpfile();
+    assert(fp);
+    const char *html = "<!DOCTYPE html><html><body><p>Hi</p></body></html>";
+    assert(fwrite(html, 1, strlen(html), fp) == strlen(html));
+    assert(fflush(fp) == 0);
+    rewind(fp);
+    struct source s;
+    assert(source_open(&s, fileno(fp)) == 0);
+    assert(view_detect_format("-", &s, false) == VIEW_FORMAT_HTML);
+    source_close(&s);
+    fclose(fp);
+}
+
+static void test_markdown(void)
+{
+    const char *md =
+        "# Title\n\n"
+        "A **bold** and `code` [link](https://example.com) paragraph that wraps nicely.\n\n"
+        "- item one\n"
+        "- item two\n\n"
+        "> quoted line\n\n"
+        "| Col1 | Col2 |\n"
+        "| --- | --- |\n"
+        "| a | b |\n\n"
+        "```mermaid\n"
+        "flowchart TD\n"
+        "  A[Start] --> B[End]\n"
+        "```\n";
+
+    char *uni = render_str(VIEW_FORMAT_MARKDOWN, md, 60, false);
+    assert(strstr(uni, "Title\n"));
+    assert(strstr(uni, "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"));
+    assert(strstr(uni, "bold and code link (https://example.com)"));
+    assert(strstr(uni, "\xe2\x80\xa2 item one"));
+    assert(strstr(uni, "\xe2\x94\x82 quoted line"));
+    assert(strstr(uni, "\xe2\x94\x8c"));
+    assert(strstr(uni, "Start"));
+    assert(strstr(uni, "End"));
+    free(uni);
+
+    char *asc = render_str(VIEW_FORMAT_MARKDOWN, md, 60, true);
+    assert(strstr(asc, "====="));
+    assert(strstr(asc, "* item one"));
+    assert(strstr(asc, "| quoted line"));
+    assert(strstr(asc, "+------"));
+    free(asc);
+}
+
+static void test_html(void)
+{
+    const char *html =
+        "<html><head><title>Ignored</title><style>body{}</style></head>"
+        "<body><h1>Hello &amp; Welcome</h1>"
+        "<script>alert(1)</script>"
+        "<p>Visit <a href=\"https://tamlinux.org\">Tamlinux</a> &mdash; ok.</p>"
+        "<ul><li>One</li><li>Two</li></ul>"
+        "<table><tr><th>K</th><th>V</th></tr><tr><td>x</td><td>1</td></tr></table>"
+        "</body></html>";
+
+    char *out = render_str(VIEW_FORMAT_HTML, html, 72, true);
+    assert(!strstr(out, "Ignored"));
+    assert(!strstr(out, "alert(1)"));
+    assert(strstr(out, "Hello & Welcome"));
+    assert(strstr(out, "Tamlinux (https://tamlinux.org) -- ok."));
+    assert(strstr(out, "* One"));
+    assert(strstr(out, "* Two"));
+    assert(strstr(out, "+---+---+"));
+    free(out);
+}
+
+static void test_mermaid(void)
+{
+    const char *td =
+        "flowchart TD\n"
+        "  A[Input] -->|ok| B(Process)\n"
+        "  B --> C{Valid?}\n"
+        "  C -->|yes| D[Done]\n"
+        "  C -->|no| A\n";
+
+    char *out_td = render_str(VIEW_FORMAT_MERMAID, td, 72, true);
+    assert(strstr(out_td, "+-------+"));
+    assert(strstr(out_td, "| Input |"));
+    assert(strstr(out_td, "< Valid? >"));
+    assert(strstr(out_td, "(ok)"));
+    free(out_td);
+
+    const char *lr =
+        "graph LR\n"
+        "  S([Begin]) --> M[Middle] --> E[Finish]\n";
+    char *out_lr = render_str(VIEW_FORMAT_MERMAID, lr, 80, false);
+    assert(strstr(out_lr, "\xe2\x95\xad"));
+    assert(strstr(out_lr, "\xe2\x96\xb6"));
+    free(out_lr);
+
+    // Narrow width triggers TD fallback for LR without overflowing.
+    char *out_narrow = render_str(VIEW_FORMAT_MERMAID, lr, 24, true);
+    assert(strstr(out_narrow, "Begin"));
+    assert(strstr(out_narrow, "Finish"));
+    free(out_narrow);
+
+    // Unsupported diagram emits diagnostic + raw fallback.
+    char *bad = render_str(VIEW_FORMAT_MERMAID, "sequenceDiagram\nA->>B: Hi\n", 80, true);
+    assert(strstr(bad, "unsupported or invalid mermaid diagram"));
+    assert(strstr(bad, "A->>B: Hi"));
+    free(bad);
+}
+
+int main(void)
+{
+    assert(setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, ""));
+    test_detect();
+    test_markdown();
+    test_html();
+    test_mermaid();
+    puts("render: ok");
+    return 0;
+}

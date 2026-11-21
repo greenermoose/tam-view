@@ -53,6 +53,12 @@ struct mark {
 struct file_entry {
     const char *path;
     struct source source;
+    struct source rendered;
+    bool has_rendered;
+    int rendered_width;
+    bool render_mode;
+    bool force_render;
+    bool render_inited;
     int fd;
     bool opened;
     bool own_fd;
@@ -89,6 +95,7 @@ struct pager {
     bool chop;
     bool following;
     bool hold_eof;
+    struct view_options opts;
     off_t follow_size;
     enum job job;
     enum prompt prompt;
@@ -283,6 +290,7 @@ static int build_page(struct pager *p, struct position *end)
             "/ / ?                  Find POSIX regex forward / backward",
             "n / N                  Repeat / reverse search",
             ":n / :p / :x / :f      Next / prev / first / current file",
+            "R                      Toggle rendered / raw view",
             "F                      Follow growing file or pipe",
             "q                      Quit and keep the page"
         };
@@ -469,6 +477,47 @@ static int mark_index(int c)
     return -1;
 }
 
+static struct source *active_source(struct file_entry *f)
+{
+    return (f->render_mode && f->has_rendered) ? &f->rendered : &f->source;
+}
+
+static void ensure_rendered(struct pager *p, struct file_entry *f)
+{
+    if (!f->render_inited) {
+        f->render_inited = true;
+        if (p->opts.mode == VIEW_MODE_RAW) {
+            f->render_mode = false;
+            f->force_render = false;
+        } else if (p->opts.mode == VIEW_MODE_RENDER) {
+            f->render_mode = true;
+            f->force_render = true;
+        } else {
+            enum view_format fmt = view_detect_format(f->path, &f->source, false);
+            f->render_mode = (fmt != VIEW_FORMAT_RAW);
+            f->force_render = false;
+        }
+    }
+    if (!f->render_mode)
+        return;
+    if (f->has_rendered && f->rendered_width == p->width)
+        return;
+    if (f->has_rendered) {
+        source_close(&f->rendered);
+        f->has_rendered = false;
+    }
+    if (view_render_source(&f->source, f->path, p->width, p->opts.ascii,
+                           f->force_render, &f->rendered) == 0) {
+        f->has_rendered = true;
+        f->rendered_width = p->width;
+    } else {
+        f->render_mode = false;
+        snprintf(p->message_buf, sizeof(p->message_buf),
+                 "Render failed: %s", strerror(errno));
+        p->message = p->message_buf;
+    }
+}
+
 static int switch_file(struct pager *p, size_t target)
 {
     if (target >= p->file_count) {
@@ -525,8 +574,9 @@ static int switch_file(struct pager *p, size_t target)
         dst->opened = true;
     }
 
+    ensure_rendered(p, dst);
     p->file_index = target;
-    p->source = &dst->source;
+    p->source = active_source(dst);
     p->top = dst->top;
     p->h_offset = dst->h_offset;
     p->label = dst->path;
@@ -1027,6 +1077,21 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->current.valid = false;
         p->message = p->chop ? "Chop long lines" : "Wrap long lines";
         return align(p, p->top, &p->top);
+    } else if (c == 'R') {
+        struct file_entry *cur = &p->files[p->file_index];
+        cur->render_mode = !cur->render_mode;
+        if (cur->render_mode) {
+            cur->force_render = true;
+            ensure_rendered(p, cur);
+        }
+        p->source = active_source(cur);
+        p->top = (struct position){0};
+        p->cursor = (struct position){0};
+        p->h_offset = 0;
+        p->search.hit = -1;
+        p->current.valid = false;
+        p->message = cur->render_mode ? "Render mode" : "Raw mode";
+        return 0;
     } else if (c == 'g' || key.type == TAM_KEY_HOME) {
         save_jump_mark(p);
         p->search.hit = -1;
@@ -1084,6 +1149,14 @@ static int refresh_size(struct pager *p)
         p->job = IDLE;
     if (size_view(p) < 0)
         return -1;
+    struct file_entry *cur = &p->files[p->file_index];
+    if (cur->render_mode) {
+        ensure_rendered(p, cur);
+        p->source = active_source(cur);
+        off_t sz = source_size(p->source);
+        if (sz >= 0 && p->top.byte >= sz)
+            p->top = (struct position){0};
+    }
     return align(p, p->top, &p->top);
 }
 
@@ -1258,7 +1331,8 @@ static int dump_inputs(struct file_entry *files, size_t count)
     return result;
 }
 
-int view_interactive(const struct view_input *inputs, size_t count, int tty)
+int view_interactive(const struct view_input *inputs, size_t count, int tty,
+                     struct view_options opts)
 {
     struct file_entry *files = calloc(count, sizeof(*files));
     if (!files)
@@ -1280,6 +1354,7 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty)
         .files = files,
         .file_count = count,
         .file_index = 0,
+        .opts = opts,
         .label = files[0].path,
         .dirty = true
     };
@@ -1310,6 +1385,8 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty)
 
     if (size_view(&p) == 0 && signal_pipe(wake) == 0 &&
         tam_tty_raw(&p.tty, true) == 0) {
+        ensure_rendered(&p, &files[0]);
+        p.source = active_source(&files[0]);
         result = run(&p, wake[0]);
         if (result < 0 && p.current.valid) {
             int error = errno;
@@ -1334,6 +1411,8 @@ cleanup:;
     free(p.search.line);
     free(p.next.text);
     for (size_t i = 0; i < count; i++) {
+        if (files[i].has_rendered)
+            source_close(&files[i].rendered);
         if (files[i].opened)
             source_close(&files[i].source);
         if (files[i].own_fd && files[i].fd >= 0)

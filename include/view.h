@@ -44,6 +44,24 @@ struct view_input {
     int fd;
 };
 
+enum view_format {
+    VIEW_FORMAT_RAW = 0,
+    VIEW_FORMAT_MARKDOWN,
+    VIEW_FORMAT_HTML,
+    VIEW_FORMAT_MERMAID
+};
+
+enum view_mode {
+    VIEW_MODE_AUTO = 0,
+    VIEW_MODE_RAW,
+    VIEW_MODE_RENDER
+};
+
+struct view_options {
+    enum view_mode mode;
+    bool ascii;
+};
+
 bool position_equal(struct position a, struct position b);
 int position_compare(struct position a, struct position b);
 int view_row(struct source *s, struct position start, int width,
@@ -53,6 +71,11 @@ int view_row_h(struct source *s, struct position start, int width,
 size_t view_row_capacity(int width);
 void view_label(char *out, size_t cap, int width, const char *text);
 int view_dump(struct source *s, int width);
-int view_interactive(const struct view_input *inputs, size_t count, int tty);
+enum view_format view_detect_format(const char *path, struct source *s,
+                                    bool force_render);
+int view_render_source(struct source *raw, const char *path, int width,
+                       bool ascii, bool force_render, struct source *out);
+int view_interactive(const struct view_input *inputs, size_t count, int tty,
+                     struct view_options opts);
 
 #endif

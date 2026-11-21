@@ -10,8 +10,8 @@
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [--raw] [--] [FILE|- ...]\n"
-          "Page through text files or piped input. The final page stays visible.\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [--ascii] [--] [FILE|- ...]\n"
+          "View files or piped input. Markup renders by default; the final page stays visible.\n"
           "Press h for keys, or q to quit.\n", out);
 }
 
@@ -84,12 +84,17 @@ int main(int argc, char **argv)
 
     size_t file_count = 0;
     bool options = true;
+    struct view_options opts = {0};
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (options && !strcmp(arg, "--")) {
             options = false;
-        } else if (options && !strcmp(arg, "--raw")) {
-            continue;
+        } else if (options && (!strcmp(arg, "--raw") || !strcmp(arg, "-r"))) {
+            opts.mode = VIEW_MODE_RAW;
+        } else if (options && (!strcmp(arg, "--render") || !strcmp(arg, "-R"))) {
+            opts.mode = VIEW_MODE_RENDER;
+        } else if (options && !strcmp(arg, "--ascii")) {
+            opts.ascii = true;
         } else if (options && !strcmp(arg, "--help")) {
             free(inputs);
             usage(stdout);
@@ -109,6 +114,11 @@ int main(int argc, char **argv)
     if (file_count == 0)
         inputs[file_count++] = (struct view_input){.path = "-", .fd = -1};
 
+    setlocale(LC_CTYPE, "");
+    const char *term = getenv("TERM");
+    if (term && !strcmp(term, "linux"))
+        opts.ascii = true;
+
     if (!isatty(STDOUT_FILENO)) {
         int status = 0;
         for (size_t i = 0; i < file_count; i++) {
@@ -118,16 +128,46 @@ int main(int argc, char **argv)
                 status = 2;
                 break;
             }
-            if (fd < 0 || copy(fd) < 0) {
+            if (fd < 0) {
+                status = diagnostic(label);
+                break;
+            }
+            if (opts.mode == VIEW_MODE_RENDER) {
+                struct source s;
+                if (source_open(&s, fd) < 0) {
+                    int err = errno;
+                    if (fd != STDIN_FILENO)
+                        close(fd);
+                    errno = err;
+                    status = diagnostic(label);
+                    break;
+                }
+                struct source rendered;
+                int rc = view_render_source(&s, label, 80, opts.ascii,
+                                            true, &rendered);
+                if (rc == 0) {
+                    rc = view_dump(&rendered, 80);
+                    source_close(&rendered);
+                }
                 int err = errno;
-                if (fd >= 0 && fd != STDIN_FILENO)
+                source_close(&s);
+                if (fd != STDIN_FILENO)
+                    close(fd);
+                if (rc < 0) {
+                    errno = err;
+                    status = diagnostic(label);
+                    break;
+                }
+            } else if (copy(fd) < 0) {
+                int err = errno;
+                if (fd != STDIN_FILENO)
                     close(fd);
                 errno = err;
                 status = diagnostic(label);
                 break;
-            }
-            if (fd != STDIN_FILENO)
+            } else if (fd != STDIN_FILENO) {
                 close(fd);
+            }
         }
         free(inputs);
         return status;
@@ -146,13 +186,11 @@ int main(int argc, char **argv)
     inputs[0].path = first_label;
     inputs[0].fd = input;
 
-    setlocale(LC_CTYPE, "");
-    const char *term = getenv("TERM");
     int tty = term && strcmp(term, "dumb")
                 ? open("/dev/tty", O_RDWR | O_CLOEXEC) : -1;
     int result = 0;
     if (tty >= 0) {
-        result = view_interactive(inputs, file_count, tty);
+        result = view_interactive(inputs, file_count, tty, opts);
         close(tty);
     } else {
         for (size_t i = 0; i < file_count; i++) {
