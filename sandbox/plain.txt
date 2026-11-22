@@ -1,0 +1,5 @@
+# This is plain text (not .md)
+In default mode, tam-view keeps .txt files raw so lines starting with #
+(like shell comments or #include) are not turned into headings.
+
+Press R in the pager—or run with -R / --render—to force Markdown rendering.

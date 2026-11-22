@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Ignored Title</title>
+  <style>body { color: red; }</style>
+</head>
+<body>
+  <h1>Tam-View HTML Demo &amp; Test</h1>
+  <script>console.log("this should not appear");</script>
+
+  <p>This paragraph tests <strong>HTML</strong> rendering, entity decoding &mdash; such as &ldquo;quotes&rdquo; and &hellip; &mdash; and <a href="https://tamlinux.org">hyperlinks</a>.</p>
+
+  <h2>Checklist</h2>
+  <ul>
+    <li>Skips <code>&lt;head&gt;</code>, <code>&lt;script&gt;</code>, and <code>&lt;style&gt;</code></li>
+    <li>Formats ordered and unordered lists</li>
+    <li>Renders tables cleanly</li>
+  </ul>
+
+  <blockquote>Quoted text from an HTML document.</blockquote>
+
+  <pre>preformatted
+  indented line
+    preserved</pre>
+
+  <table>
+    <tr><th>Item</th><th>Status</th></tr>
+    <tr><td>Entities</td><td>Decoded</td></tr>
+    <tr><td>Tables</td><td>Boxed</td></tr>
+  </table>
+</body>
+</html>

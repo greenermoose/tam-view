@@ -1,0 +1,7 @@
+flowchart TD
+  Start([Start]) --> Read[Read Input]
+  Read --> Check{Valid Syntax?}
+  Check -->|yes| Layout(Compute Layers)
+  Check -->|no| Fallback[Show Diagnostic + Raw]
+  Layout --> Draw((Render Boxes))
+  Draw --> Check
