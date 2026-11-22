@@ -12,8 +12,10 @@ STATE
   regex search, wrapping, horizontal scroll, and ESC sanitization remain
   exact. Supports --color[=auto|always|never], --no-color, NO_COLOR,
   TERM=dumb, TERM=linux, live C toggle, and Esc highlight clearing.
-  Added sandbox/README-sandbox for tam-idol 1.1.0 compliance; dev build
-  installed to ~/.local/bin/tam-view.
+  Added sandbox/README-sandbox for tam-idol 1.1.0 compliance; reaching
+  EOF now defaults to showing "End of file (q quit)" and waiting for q
+  (-E/--quit-at-eof restores auto-exit at EOF); dev build installed to
+  ~/.local/bin/tam-view.
 
 NEXT
 

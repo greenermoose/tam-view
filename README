@@ -1,8 +1,10 @@
 TAM-VIEW - A TERMINAL FILE VIEWER
 
 tam-view reads text files and piped input. It borrows its navigation
-from less and leaves the last page visible when you reach the end or
-press q. The shell prompt appears on the line below the text.
+from less and leaves the last page visible when you press q. At end of
+file it shows a message and waits for q (pass -E / --quit-at-eof to
+return automatically at EOF). The shell prompt appears on the line
+below the text.
 
 Follows the tam-idol 1.1.0 standard.
 
@@ -38,7 +40,7 @@ KEYS
   Left, Right          Scroll horizontally
   S                    Toggle chop long lines
   g, Home              Start
-  G, End               Show the last page and return to the prompt
+  G, End               Show the last page
   Ng                   Go to file line N, for example 42g
   m<a-z>, '<a-z>, ''   Set mark, go to mark, or return to previous position
   /regex, ?regex       Find POSIX regex forward or backward

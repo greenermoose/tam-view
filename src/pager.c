@@ -444,9 +444,12 @@ static int paint(struct pager *p)
         return -1;
     bool at_last_file = p->file_index + 1 >= p->file_count;
     bool eof_doc = state == VIEW_EOF && p->next.document;
-    bool final = eof_doc && !p->following && !p->hold_eof && at_last_file;
-    if (eof_doc && !p->following && !at_last_file && !p->message)
-        p->message = "End of file (:n next, q quit)";
+    bool final = p->opts.quit_at_eof && eof_doc && !p->following &&
+                 !p->hold_eof && at_last_file;
+    if (eof_doc && !p->following && !final && !p->message) {
+        p->message = at_last_file ? "End of file (q quit)"
+                                  : "End of file (:n next, q quit)";
+    }
     if (eof_doc && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
         if (p->next.count == 0 && p->top.byte > 0) {
             off_t size = source_size(p->source);

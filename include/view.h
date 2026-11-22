@@ -109,6 +109,7 @@ struct view_options {
     bool color;
     bool ascii;
     bool linux_vt;
+    bool quit_at_eof;
 };
 
 void view_styles_free(struct view_styles *st);

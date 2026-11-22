@@ -32,6 +32,9 @@ DONE
   - Bumped VERSION to 0.3.0, added plans/P3-styling-and-highlighting.md
     and sandbox/README-sandbox, updated ROADMAP.md, README, P1/P2 status,
     and work/WHATNOW.
+  - Changed default EOF behavior to show "End of file (q quit)" and wait
+    for q, with -E/--quit-at-eof (and --no-quit-at-eof) to optionally
+    auto-exit at EOF; updated PTY tests and README.
   - Verified make test, make sanitize, ldd (libc only), idol-check, and
     installed dev build to ~/.local/bin/tam-view.
 

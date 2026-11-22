@@ -10,7 +10,7 @@
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [-r|--raw] [-R|--render] [--ascii] [--color[=WHEN]|--no-color] [--] [FILE|- ...]\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--ascii] [--color[=WHEN]|--no-color] [--] [FILE|- ...]\n"
           "View files or piped input. Markup renders by default; the final page stays visible.\n"
           "Press h for keys, or q to quit.\n", out);
 }
@@ -93,6 +93,10 @@ int main(int argc, char **argv)
             opts.mode = VIEW_MODE_RAW;
         } else if (options && (!strcmp(arg, "--render") || !strcmp(arg, "-R"))) {
             opts.mode = VIEW_MODE_RENDER;
+        } else if (options && (!strcmp(arg, "--quit-at-eof") || !strcmp(arg, "-E"))) {
+            opts.quit_at_eof = true;
+        } else if (options && !strcmp(arg, "--no-quit-at-eof")) {
+            opts.quit_at_eof = false;
         } else if (options && !strcmp(arg, "--ascii")) {
             opts.ascii = true;
         } else if (options && (!strcmp(arg, "--color") ||

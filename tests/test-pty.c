@@ -327,12 +327,23 @@ int main(int argc, char **argv)
 
     write_file(path, "first\nsecond\nthird");
     t = start(argv[1], path, -1, -1);
+    expect(&t, 3, "End of file (q quit)");
+    CHECK(contains(&t, 0, "first") && contains(&t, 2, "third"));
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    CHECK(contains(&t, 0, "first") && contains(&t, 2, "third"));
+    close_terminal(&t);
+
+    // -E / --quit-at-eof automatically returns to the shell at EOF.
+    t = start_args(argv[1], "-E", path, -1, -1);
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "first") && contains(&t, 2, "third"));
     close_terminal(&t);
 
     write_file(path, "");
     t = start(argv[1], path, -1, -1);
+    expect(&t, 0, "End of file (q quit)");
+    send_key(&t, "q");
     finish(&t, 0, 0);
     close_terminal(&t);
 
@@ -340,6 +351,8 @@ int main(int argc, char **argv)
     t = start(argv[1], path, -1, -1);
     expect(&t, 3, path);
     send_key(&t, " ");
+    expect(&t, 3, "End of file (q quit)");
+    send_key(&t, "q");
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "third") && contains(&t, 2, "fifth"));
     close_terminal(&t);
@@ -353,6 +366,8 @@ int main(int argc, char **argv)
     t = start(argv[1], path, -1, -1);
     expect(&t, 3, path);
     send_key(&t, "G");
+    expect(&t, 3, "End of file (q quit)");
+    send_key(&t, "q");
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "last-2") && contains(&t, 2, "last"));
     close_terminal(&t);
@@ -389,6 +404,8 @@ int main(int argc, char **argv)
     CHECK(contains(&t, 0, "a"));
     CHECK(write(stream[1], "b", 1) == 1);
     CHECK(close(stream[1]) == 0);
+    expect(&t, 2, "End of file (q quit)");
+    send_key(&t, "q");
     finish(&t, 0, 2);
     CHECK(contains(&t, 1, "b"));
     close_terminal(&t);
@@ -450,6 +467,8 @@ int main(int argc, char **argv)
     send_key(&t, ":f");
     expect(&t, 3, "file 2 of 2:");
     send_key(&t, " ");
+    expect(&t, 3, "End of file (q quit)");
+    send_key(&t, "q");
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "file2-b") && contains(&t, 2, "file2-d"));
     close_terminal(&t);
