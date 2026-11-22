@@ -6,7 +6,7 @@ Updated: 2026-11-22, with W4
 
 STATE
 
-  0.3.0 on dev adds ANSI terminal styling for rendered Markdown, HTML,
+  0.3.1 on dev adds ANSI terminal styling for rendered Markdown, HTML,
   and Mermaid documents plus live POSIX regex search highlighting in
   both raw and rendered modes, using sidecar byte-offset style spans so
   regex search, wrapping, horizontal scroll, and ESC sanitization remain
