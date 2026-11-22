@@ -19,9 +19,12 @@ STATE
 
 NEXT
 
-  1. Install/package for Tamlinux when Fred calls for the next stage.
-  2. Optional future slices: R1 code review & man page (0.3.1) or
-     additional Mermaid diagram types (sequence/state/subgraphs).
+  1. 0.4.0 — Link navigation (plans/P4-link-navigation.md): keyboard
+     link cycling/following (local files, anchors, back-history,
+     external xdg-open) and optional OSC 8 terminal hyperlinks.
+  2. Install/package for Tamlinux when Fred calls for the next stage.
+  3. Later optional slices: R1 code review & man page, or additional
+     Mermaid diagram types (sequence/state/subgraphs).
 
 WAITING FOR FRED
 

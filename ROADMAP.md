@@ -25,3 +25,11 @@ modes using sidecar byte-offset style spans so search, wrapping, and
 input sanitization remain exact. Support `--color`/`--no-color`,
 `NO_COLOR`, `TERM=dumb`, `TERM=linux`, live `C` color toggle, and `Esc`
 highlight clearing.
+
+## 0.4.0 — Link navigation
+
+Record link targets alongside rendered documents so users can focus and
+follow hyperlinks from Markdown and HTML. Support keyboard link cycling
+and following (opening local/relative documents and anchors inside
+tam-view with back-history, and handing external URLs to `xdg-open`),
+plus optional OSC 8 terminal hyperlinks on capable terminals.
