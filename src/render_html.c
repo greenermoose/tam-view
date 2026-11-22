@@ -71,8 +71,27 @@ static void decode_entity(struct rbuf *b, const char *s, size_t len,
         {"mdash", "\xe2\x80\x94", "--"},
         {"ndash", "\xe2\x80\x93", "-"},
         {"hellip", "\xe2\x80\xa6", "..."},
+        {"ldquo", "\xe2\x80\x9c", "\""},
+        {"rdquo", "\xe2\x80\x9d", "\""},
+        {"lsquo", "\xe2\x80\x98", "'"},
+        {"rsquo", "\xe2\x80\x99", "'"},
+        {"laquo", "\xc2\xab", "<<"},
+        {"raquo", "\xc2\xbb", ">>"},
+        {"middot", "\xc2\xb7", "*"},
+        {"deg", "\xc2\xb0", " deg"},
+        {"plusmn", "\xc2\xb1", "+/-"},
+        {"times", "\xc3\x97", "x"},
+        {"divide", "\xc3\xb7", "/"},
+        {"sect", "\xc2\xa7", "S"},
+        {"para", "\xc2\xb6", "P"},
         {"bull", "\xe2\x80\xa2", "*"},
-        {"copy", "\xc2\xa9", "(c)"}
+        {"copy", "\xc2\xa9", "(c)"},
+        {"reg", "\xc2\xae", "(R)"},
+        {"trade", "\xe2\x84\xa2", "(TM)"},
+        {"euro", "\xe2\x82\xac", "EUR"},
+        {"pound", "\xc2\xa3", "GBP"},
+        {"yen", "\xc2\xa5", "JPY"},
+        {"cent", "\xc2\xa2", "c"}
     };
     for (size_t m = 0; m < sizeof(map) / sizeof(map[0]); m++) {
         if (strlen(map[m].name) == elen &&

@@ -210,7 +210,23 @@ int main(int argc, char **argv)
                 first_label = inputs[i].path;
                 break;
             }
-            result = view_dump(&s, 80);
+            if (opts.mode != VIEW_MODE_RAW) {
+                struct source rendered;
+                const char *lbl = i == 0 ? first_label : inputs[i].path;
+                int rc = view_render_source(&s, lbl, 80, opts.ascii,
+                                            opts.mode == VIEW_MODE_RENDER,
+                                            &rendered);
+                if (rc == 0) {
+                    result = view_dump(&rendered, 80);
+                    source_close(&rendered);
+                } else if (errno == EINVAL) {
+                    result = view_dump(&s, 80);
+                } else {
+                    result = -1;
+                }
+            } else {
+                result = view_dump(&s, 80);
+            }
             int err = errno;
             source_close(&s);
             if (fd != STDIN_FILENO && fd != input)

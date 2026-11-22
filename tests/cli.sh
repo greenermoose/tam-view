@@ -33,6 +33,10 @@ printf 'flowchart TD\nA[One] --> B[Two]\n' > sample.mmd
 grep -F '| One |' mmd_out >/dev/null
 grep -F '| Two |' mmd_out >/dev/null
 
+printf '<p>&ldquo;hi&rdquo;</p>\n' > sample.html
+TERM=dumb "$bin" -R --ascii sample.html > html_out
+grep -F '"hi"' html_out >/dev/null
+
 if "$bin" --invalid 2> error || "$bin" absent 2> error ||
    "$bin" . 2> error || "$bin" one two 2> error; then
     exit 1

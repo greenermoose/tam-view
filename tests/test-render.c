@@ -84,7 +84,7 @@ static void test_html(void)
         "<html><head><title>Ignored</title><style>body{}</style></head>"
         "<body><h1>Hello &amp; Welcome</h1>"
         "<script>alert(1)</script>"
-        "<p>Visit <a href=\"https://tamlinux.org\">Tamlinux</a> &mdash; ok.</p>"
+        "<p>Visit <a href=\"https://tamlinux.org\">Tamlinux</a> &mdash; &ldquo;ok&rdquo; &lsquo;y&rsquo;.</p>"
         "<ul><li>One</li><li>Two</li></ul>"
         "<table><tr><th>K</th><th>V</th></tr><tr><td>x</td><td>1</td></tr></table>"
         "</body></html>";
@@ -93,11 +93,15 @@ static void test_html(void)
     assert(!strstr(out, "Ignored"));
     assert(!strstr(out, "alert(1)"));
     assert(strstr(out, "Hello & Welcome"));
-    assert(strstr(out, "Tamlinux (https://tamlinux.org) -- ok."));
+    assert(strstr(out, "Tamlinux (https://tamlinux.org) -- \"ok\" 'y'."));
     assert(strstr(out, "* One"));
     assert(strstr(out, "* Two"));
     assert(strstr(out, "+---+---+"));
     free(out);
+
+    char *out_u = render_str(VIEW_FORMAT_HTML, "<p>&ldquo;hi&rdquo;</p>", 72, false);
+    assert(strstr(out_u, "\xe2\x80\x9c" "hi" "\xe2\x80\x9d"));
+    free(out_u);
 }
 
 static void test_mermaid(void)
@@ -114,6 +118,11 @@ static void test_mermaid(void)
     assert(strstr(out_td, "| Input |"));
     assert(strstr(out_td, "< Valid? >"));
     assert(strstr(out_td, "(ok)"));
+    assert(strstr(out_td, "(yes) > [Done]"));
+    assert(strstr(out_td, "(no) > [Input]"));
+    // Cycle back-edge A <- C must not push Input below Valid?.
+    assert(strstr(out_td, "| Input |") < strstr(out_td, "< Valid? >"));
+    assert(strstr(out_td, "< Valid? >") < strstr(out_td, "| Done |"));
     free(out_td);
 
     const char *lr =

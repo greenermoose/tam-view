@@ -10,11 +10,13 @@ STATE
   (Markdown, HTML, and Mermaid flowcharts), with -r/--raw, -R/--render,
   --ascii (auto on TERM=linux), and the R key toggle in the pager while
   preserving 0.0.1/0.1.0 navigation, search, and primary-screen exit.
+  Polished HTML typographic entities, Mermaid TD cycle layering and
+  branching edge labels, and TERM=dumb/no-tty render fallback; dev build
+  installed to ~/.local/bin/tam-view.
 
 NEXT
 
-  1. Review 0.2.0 rendered output on sample Markdown, HTML, and Mermaid
-     documents; install/package when Fred calls for the next stage.
+  1. Install/package for Tamlinux when Fred calls for the next stage.
 
 WAITING FOR FRED
 

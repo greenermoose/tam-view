@@ -281,12 +281,49 @@ static const char *parse_edge_op(const char *p, const char *end,
     return p;
 }
 
+static void dfs_classify(const struct mgraph *g, int u,
+                         unsigned char *state, bool *is_back)
+{
+    state[u] = 1;
+    for (size_t e = 0; e < g->n_edges; e++) {
+        if (g->edges[e].from != u)
+            continue;
+        int v = g->edges[e].to;
+        if (u == v || state[v] == 1)
+            is_back[e] = true;
+        else if (state[v] == 0)
+            dfs_classify(g, v, state, is_back);
+    }
+    state[u] = 2;
+}
+
 static void assign_layers(struct mgraph *g)
 {
-    // Iterative relaxation capped at n_nodes to handle cycles safely.
+    if (g->n_nodes == 0)
+        return;
+
+    size_t *indeg = calloc(g->n_nodes, sizeof(*indeg));
+    unsigned char *state = calloc(g->n_nodes, sizeof(*state));
+    bool *is_back = calloc(g->n_edges ? g->n_edges : 1, sizeof(*is_back));
+    if (indeg && state && is_back) {
+        for (size_t e = 0; e < g->n_edges; e++)
+            indeg[g->edges[e].to]++;
+        for (size_t i = 0; i < g->n_nodes; i++) {
+            if (indeg[i] == 0 && state[i] == 0)
+                dfs_classify(g, (int)i, state, is_back);
+        }
+        for (size_t i = 0; i < g->n_nodes; i++) {
+            if (state[i] == 0)
+                dfs_classify(g, (int)i, state, is_back);
+        }
+    }
+
+    // Longest-path relaxation over the acyclic forward edges.
     for (size_t iter = 0; iter < g->n_nodes; iter++) {
         bool changed = false;
         for (size_t e = 0; e < g->n_edges; e++) {
+            if (is_back && is_back[e])
+                continue;
             int u = g->edges[e].from;
             int v = g->edges[e].to;
             if (u == v)
@@ -300,6 +337,11 @@ static void assign_layers(struct mgraph *g)
         if (!changed)
             break;
     }
+
+    free(indeg);
+    free(state);
+    free(is_back);
+
     if (g->reverse) {
         int max_l = 0;
         for (size_t i = 0; i < g->n_nodes; i++) {
@@ -404,6 +446,11 @@ static void render_td(struct rbuf *b, struct mgraph *g, int width,
         }
 
         // Render outgoing edges from this layer.
+        size_t out_from_layer = 0;
+        for (size_t e = 0; e < g->n_edges; e++) {
+            if (g->nodes[g->edges[e].from].layer == l)
+                out_from_layer++;
+        }
         for (size_t e = 0; e < g->n_edges; e++) {
             int u = g->edges[e].from;
             int v = g->edges[e].to;
@@ -414,7 +461,7 @@ static void render_td(struct rbuf *b, struct mgraph *g, int width,
             if (g->edges[e].label) {
                 rbuf_printf(b, " (%s)", g->edges[e].label);
             }
-            if (g->nodes[v].layer != l + 1) {
+            if (g->nodes[v].layer != l + 1 || out_from_layer > 1) {
                 rbuf_printf(b, " %s [%s]",
                             g->edges[e].arrow ? box->arrow_r : box->h,
                             g->nodes[v].label);
