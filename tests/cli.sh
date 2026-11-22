@@ -23,17 +23,28 @@ cat ./-dash second > both
 "$bin" -- -dash second > output
 cmp both output
 
-printf '# Heading\n\n* item\n' > sample.md
+printf '# Heading\n\n* [item](https://tamlinux.org)\n' > sample.md
 "$bin" -R --ascii sample.md > md_out
 grep -F 'Heading' md_out >/dev/null
-grep -F '* item' md_out >/dev/null
-# Redirected -R defaults to plain text (no ESC bytes).
+grep -F '* item (https://tamlinux.org)' md_out >/dev/null
+# Redirected -R defaults to plain text (no ESC bytes, no OSC 8).
 if grep -q "$(printf '\033')" md_out; then
     exit 1
 fi
-# Explicit --color emits ANSI SGR on rendered stdout.
+# Explicit --color emits ANSI SGR on rendered stdout (still no OSC 8 unless --hyperlinks).
 "$bin" -R --ascii --color sample.md > md_color
 grep -q "$(printf '\033\[')" md_color
+if grep -q "$(printf '\033\]8;;')" md_color; then
+    exit 1
+fi
+# Explicit --hyperlinks emits OSC 8 on redirected -R.
+"$bin" -R --ascii --hyperlinks sample.md > md_osc8
+grep -q "$(printf '\033\]8;;https://tamlinux.org\033\\\\')" md_osc8
+# --no-hyperlinks suppresses OSC 8.
+"$bin" -R --ascii --color --no-hyperlinks sample.md > md_noosc8
+if grep -q "$(printf '\033\]8;;')" md_noosc8; then
+    exit 1
+fi
 # --no-color and NO_COLOR=1 suppress ANSI SGR.
 "$bin" -R --ascii --no-color sample.md > md_nocolor
 if grep -q "$(printf '\033')" md_nocolor; then

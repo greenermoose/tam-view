@@ -1,5 +1,6 @@
 #include "view.h"
 
+#include <tam_pager.h>
 #include <tam_uni.h>
 
 #include <errno.h>
@@ -59,6 +60,106 @@ bool view_styles_push(struct view_styles *st, off_t start, off_t end,
     return true;
 }
 
+void view_links_free(struct view_links *lk)
+{
+    if (!lk)
+        return;
+    for (size_t i = 0; i < lk->count; i++)
+        free(lk->items[i].url);
+    free(lk->items);
+    free(lk->spans);
+    for (size_t i = 0; i < lk->anchor_count; i++)
+        free(lk->anchors[i].id);
+    free(lk->anchors);
+    *lk = (struct view_links){0};
+}
+
+ssize_t view_links_add_item(struct view_links *lk, const char *url,
+                            size_t url_len, off_t first_byte)
+{
+    if (!lk || !url || url_len == 0)
+        return -1;
+    if (lk->count == lk->cap) {
+        size_t ncap = lk->cap ? lk->cap * 2 : 16;
+        struct view_link *grown = realloc(lk->items, ncap * sizeof(*grown));
+        if (!grown)
+            return -1;
+        lk->items = grown;
+        lk->cap = ncap;
+    }
+    char *copy = malloc(url_len + 1);
+    if (!copy)
+        return -1;
+    memcpy(copy, url, url_len);
+    copy[url_len] = '\0';
+    size_t idx = lk->count++;
+    lk->items[idx] = (struct view_link){
+        .url = copy,
+        .first_byte = first_byte
+    };
+    return (ssize_t)idx;
+}
+
+bool view_links_push_span(struct view_links *lk, off_t start, off_t end,
+                          size_t link_index)
+{
+    if (!lk || end <= start || link_index >= lk->count)
+        return true;
+    if (lk->span_count > 0) {
+        struct view_link_span *prev = &lk->spans[lk->span_count - 1];
+        if (start < prev->end) {
+            start = prev->end;
+            if (end <= start)
+                return true;
+        }
+        if (prev->end == start && prev->link_index == link_index) {
+            prev->end = end;
+            return true;
+        }
+    }
+    if (lk->span_count == lk->span_cap) {
+        size_t ncap = lk->span_cap ? lk->span_cap * 2 : 32;
+        struct view_link_span *grown = realloc(lk->spans, ncap * sizeof(*grown));
+        if (!grown)
+            return false;
+        lk->spans = grown;
+        lk->span_cap = ncap;
+    }
+    lk->spans[lk->span_count++] = (struct view_link_span){
+        .start = start,
+        .end = end,
+        .link_index = link_index
+    };
+    if (start < lk->items[link_index].first_byte)
+        lk->items[link_index].first_byte = start;
+    return true;
+}
+
+bool view_links_add_anchor(struct view_links *lk, const char *id,
+                           size_t id_len, off_t byte)
+{
+    if (!lk || !id || id_len == 0)
+        return true;
+    if (lk->anchor_count == lk->anchor_cap) {
+        size_t ncap = lk->anchor_cap ? lk->anchor_cap * 2 : 16;
+        struct view_anchor *grown = realloc(lk->anchors, ncap * sizeof(*grown));
+        if (!grown)
+            return false;
+        lk->anchors = grown;
+        lk->anchor_cap = ncap;
+    }
+    char *copy = malloc(id_len + 1);
+    if (!copy)
+        return false;
+    memcpy(copy, id, id_len);
+    copy[id_len] = '\0';
+    lk->anchors[lk->anchor_count++] = (struct view_anchor){
+        .id = copy,
+        .byte = byte
+    };
+    return true;
+}
+
 static const char *style_sgr(unsigned char style, bool linux_vt)
 {
     switch (style) {
@@ -71,6 +172,7 @@ static const char *style_sgr(unsigned char style, bool linux_vt)
     case VIEW_STYLE_CODE:       return "\033[33m";
     case VIEW_STYLE_LINK:       return "\033[4;34m";
     case VIEW_STYLE_LINK_URL:   return "\033[2m";
+    case VIEW_STYLE_LINK_CUR:   return tam_pager_link_focus_sgr(linux_vt);
     case VIEW_STYLE_QUOTE:      return linux_vt ? "\033[32m" : "\033[2;32m";
     case VIEW_STYLE_RULE:       return "\033[2m";
     case VIEW_STYLE_TABLE_HDR:  return "\033[1m";
@@ -106,24 +208,104 @@ static unsigned char span_style_at(const struct view_span *spans, size_t count,
     return VIEW_STYLE_NONE;
 }
 
+static size_t link_span_lower_bound(const struct view_link_span *spans,
+                                    size_t count, off_t byte)
+{
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (spans[mid].end <= byte)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+static ssize_t link_index_at(const struct view_links *lk, size_t *idx,
+                             off_t byte)
+{
+    if (!lk || lk->span_count == 0)
+        return -1;
+    while (*idx < lk->span_count && lk->spans[*idx].end <= byte)
+        (*idx)++;
+    if (*idx < lk->span_count &&
+        lk->spans[*idx].start <= byte && byte < lk->spans[*idx].end)
+        return (ssize_t)lk->spans[*idx].link_index;
+    return -1;
+}
+
+static void emit_raw(char *out, size_t *used, const char *seq)
+{
+    if (!out || !seq || !seq[0])
+        return;
+    size_t slen = strlen(seq);
+    memcpy(out + *used, seq, slen);
+    *used += slen;
+}
+
 static void emit_style(char *out, size_t *used, unsigned char *active,
-                       unsigned char want, bool linux_vt)
+                       unsigned char want, bool linux_vt, bool attention)
 {
     if (*active == want)
         return;
     if (out) {
-        if (*active != VIEW_STYLE_NONE) {
-            memcpy(out + *used, "\033[0m", 4);
-            *used += 4;
-        }
-        if (want != VIEW_STYLE_NONE) {
-            const char *seq = style_sgr(want, linux_vt);
-            size_t slen = strlen(seq);
-            memcpy(out + *used, seq, slen);
-            *used += slen;
+        if (*active != VIEW_STYLE_NONE || attention)
+            emit_raw(out, used, "\033[0m");
+        if (want == VIEW_STYLE_NONE) {
+            if (attention)
+                emit_raw(out, used, tam_pager_attention_sgr(linux_vt));
+        } else {
+            if (attention && !linux_vt &&
+                want != VIEW_STYLE_SEARCH &&
+                want != VIEW_STYLE_SEARCH_CUR &&
+                want != VIEW_STYLE_LINK_CUR) {
+                emit_raw(out, used, "\033[48;5;236m");
+            }
+            emit_raw(out, used, style_sgr(want, linux_vt));
         }
     }
     *active = want;
+}
+
+#define OSC8_ROW_BUDGET 4096
+
+static void emit_osc8(char *out, size_t *used, size_t *osc8_used,
+                      ssize_t *active_link, ssize_t want_link,
+                      const struct view_links *lk)
+{
+    if (*active_link == want_link)
+        return;
+    if (*active_link >= 0) {
+        if (out) {
+            char close_buf[16];
+            size_t n = tam_osc8_close(close_buf, sizeof(close_buf));
+            memcpy(out + *used, close_buf, n);
+            *used += n;
+            *osc8_used += n;
+        }
+        *active_link = -1;
+    }
+    if (want_link >= 0 && lk && (size_t)want_link < lk->count) {
+        const char *url = lk->items[want_link].url;
+        if (tam_osc8_url_safe(url, 1024)) {
+            size_t open_len = 5 + strlen(url) + 2;
+            if (*osc8_used + open_len + 7 <= OSC8_ROW_BUDGET) {
+                if (out) {
+                    char open_buf[1040];
+                    size_t n = tam_osc8_open(open_buf, sizeof(open_buf), url);
+                    if (n > 0) {
+                        memcpy(out + *used, open_buf, n);
+                        *used += n;
+                        *osc8_used += n;
+                        *active_link = want_link;
+                    }
+                } else {
+                    *active_link = want_link;
+                }
+            }
+        }
+    }
 }
 
 bool position_equal(struct position a, struct position b)
@@ -184,12 +366,12 @@ size_t view_row_capacity(int width)
 
 size_t view_row_styled_capacity(int width)
 {
-    return view_row_capacity(width) + (size_t)width * 16 + 8;
+    return view_row_capacity(width) + (size_t)width * 28 + OSC8_ROW_BUDGET + 64;
 }
 
 static unsigned char resolve_style(const struct view_row_style *st,
                                    size_t *doc_idx, size_t *search_idx,
-                                   off_t byte)
+                                   ssize_t link_idx, off_t byte)
 {
     if (!st)
         return VIEW_STYLE_NONE;
@@ -199,6 +381,8 @@ static unsigned char resolve_style(const struct view_row_style *st,
         if (s != VIEW_STYLE_NONE)
             return s;
     }
+    if (st->focused_link >= 0 && link_idx == st->focused_link)
+        return VIEW_STYLE_LINK_CUR;
     if (st->doc_count > 0)
         return span_style_at(st->doc_spans, st->doc_count, doc_idx, byte);
     return VIEW_STYLE_NONE;
@@ -208,7 +392,10 @@ int view_row_styled(struct source *s, struct position start, int width,
                     int skip, bool chop, const struct view_row_style *style,
                     char *out, struct position *next)
 {
-    bool has_style = style && (style->doc_count > 0 || style->search_count > 0);
+    bool has_links = style && style->links && style->links->span_count > 0;
+    bool has_style = style && (style->doc_count > 0 || style->search_count > 0 ||
+                               style->attention ||
+                               (has_links && (style->focused_link >= 0 || style->osc8)));
     const struct view_row_style *st = has_style ? style : NULL;
     size_t doc_idx = st && st->doc_count
                      ? span_lower_bound(st->doc_spans, st->doc_count, start.byte)
@@ -216,14 +403,23 @@ int view_row_styled(struct source *s, struct position start, int width,
     size_t search_idx = st && st->search_count
                         ? span_lower_bound(st->search_spans, st->search_count, start.byte)
                         : 0;
+    size_t link_cursor = st && has_links
+                         ? link_span_lower_bound(st->links->spans,
+                                                 st->links->span_count, start.byte)
+                         : 0;
     bool linux_vt = st ? st->linux_vt : false;
+    bool attention = st ? st->attention : false;
+    bool want_osc8 = st && st->osc8 && has_links;
     unsigned char active = VIEW_STYLE_NONE;
+    ssize_t active_link = -1;
+    size_t osc8_used = 0;
 
     if (skip == 0 && !chop) {
         struct position p = start;
         int cells = 0;
         unsigned marks = 0;
         size_t used = 0;
+        bool attn_started = false;
 
         for (;;) {
             uint32_t cp;
@@ -283,17 +479,42 @@ int view_row_styled(struct source *s, struct position start, int width,
                 marks++;
             cells += g.width;
             if (out) {
+                if (attention && !attn_started) {
+                    emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                    attn_started = true;
+                }
                 if (st) {
+                    ssize_t lidx = has_links
+                                   ? link_index_at(st->links, &link_cursor, glyph_byte)
+                                   : -1;
+                    if (want_osc8)
+                        emit_osc8(out, &used, &osc8_used, &active_link, lidx, st->links);
                     unsigned char want = resolve_style(st, &doc_idx, &search_idx,
-                                                       glyph_byte);
-                    emit_style(out, &used, &active, want, linux_vt);
+                                                       lidx, glyph_byte);
+                    emit_style(out, &used, &active, want, linux_vt, attention);
                 }
                 memcpy(out + used, g.bytes, g.len);
                 used += g.len;
             }
         }
         if (out) {
-            emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt);
+            if (want_osc8)
+                emit_osc8(out, &used, &osc8_used, &active_link, -1, st->links);
+            if (attention) {
+                if (!attn_started) {
+                    emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                    attn_started = true;
+                } else {
+                    emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt, true);
+                }
+                if (cells < width) {
+                    memset(out + used, ' ', (size_t)(width - cells));
+                    used += (size_t)(width - cells);
+                }
+                emit_raw(out, &used, "\033[0m");
+            } else {
+                emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt, false);
+            }
             out[used] = '\0';
         }
         *next = p;
@@ -305,6 +526,7 @@ int view_row_styled(struct source *s, struct position start, int width,
     int cells = 0;
     unsigned marks = 0;
     size_t used = 0;
+    bool attn_started = false;
 
     for (;;) {
         int b = source_byte(s, p.byte);
@@ -343,10 +565,19 @@ int view_row_styled(struct source *s, struct position start, int width,
                 if (spaces > width - cells)
                     spaces = width - cells;
                 if (out) {
+                    if (attention && !attn_started) {
+                        emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                        attn_started = true;
+                    }
                     if (st) {
+                        ssize_t lidx = has_links
+                                       ? link_index_at(st->links, &link_cursor, glyph_byte)
+                                       : -1;
+                        if (want_osc8)
+                            emit_osc8(out, &used, &osc8_used, &active_link, lidx, st->links);
                         unsigned char want = resolve_style(st, &doc_idx, &search_idx,
-                                                           glyph_byte);
-                        emit_style(out, &used, &active, want, linux_vt);
+                                                           lidx, glyph_byte);
+                        emit_style(out, &used, &active, want, linux_vt, attention);
                     }
                     memset(out + used, ' ', (size_t)spaces);
                     used += (size_t)spaces;
@@ -385,10 +616,19 @@ int view_row_styled(struct source *s, struct position start, int width,
             if (spaces > width - cells)
                 spaces = width - cells;
             if (out) {
+                if (attention && !attn_started) {
+                    emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                    attn_started = true;
+                }
                 if (st) {
+                    ssize_t lidx = has_links
+                                   ? link_index_at(st->links, &link_cursor, glyph_byte)
+                                   : -1;
+                    if (want_osc8)
+                        emit_osc8(out, &used, &osc8_used, &active_link, lidx, st->links);
                     unsigned char want = resolve_style(st, &doc_idx, &search_idx,
-                                                       glyph_byte);
-                    emit_style(out, &used, &active, want, linux_vt);
+                                                       lidx, glyph_byte);
+                    emit_style(out, &used, &active, want, linux_vt, attention);
                 }
                 memset(out + used, ' ', (size_t)spaces);
                 used += (size_t)spaces;
@@ -402,10 +642,19 @@ int view_row_styled(struct source *s, struct position start, int width,
             continue;
         }
         if (out) {
+            if (attention && !attn_started) {
+                emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                attn_started = true;
+            }
             if (st) {
+                ssize_t lidx = has_links
+                               ? link_index_at(st->links, &link_cursor, glyph_byte)
+                               : -1;
+                if (want_osc8)
+                    emit_osc8(out, &used, &osc8_used, &active_link, lidx, st->links);
                 unsigned char want = resolve_style(st, &doc_idx, &search_idx,
-                                                   glyph_byte);
-                emit_style(out, &used, &active, want, linux_vt);
+                                                   lidx, glyph_byte);
+                emit_style(out, &used, &active, want, linux_vt, attention);
             }
             memcpy(out + used, g.bytes, g.len);
             used += g.len;
@@ -417,7 +666,23 @@ int view_row_styled(struct source *s, struct position start, int width,
             marks++;
     }
     if (out) {
-        emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt);
+        if (want_osc8)
+            emit_osc8(out, &used, &osc8_used, &active_link, -1, st->links);
+        if (attention) {
+            if (!attn_started) {
+                emit_raw(out, &used, tam_pager_attention_sgr(linux_vt));
+                attn_started = true;
+            } else {
+                emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt, true);
+            }
+            if (cells < width) {
+                memset(out + used, ' ', (size_t)(width - cells));
+                used += (size_t)(width - cells);
+            }
+            emit_raw(out, &used, "\033[0m");
+        } else {
+            emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt, false);
+        }
         out[used] = '\0';
     }
     *next = p;
@@ -462,7 +727,9 @@ void view_label(char *out, size_t cap, int width, const char *text)
 }
 
 int view_dump_styled(struct source *s, int width,
-                     const struct view_styles *styles, bool linux_vt)
+                     const struct view_styles *styles,
+                     const struct view_links *links,
+                     bool linux_vt, bool osc8)
 {
     // A terminal without cursor controls can still safely show plain or styled text.
     char *buf = malloc(view_row_styled_capacity(width));
@@ -471,9 +738,14 @@ int view_dump_styled(struct source *s, int width,
     struct view_row_style rs = {
         .doc_spans = styles ? styles->spans : NULL,
         .doc_count = styles ? styles->count : 0,
-        .linux_vt = linux_vt
+        .links = links,
+        .focused_link = -1,
+        .attention = false,
+        .linux_vt = linux_vt,
+        .osc8 = osc8
     };
-    const struct view_row_style *rsp = rs.doc_count > 0 ? &rs : NULL;
+    const struct view_row_style *rsp =
+        (rs.doc_count > 0 || (osc8 && links && links->span_count > 0)) ? &rs : NULL;
     struct position p = {0}, next;
     int rc = 0;
     for (;;) {
@@ -504,5 +776,5 @@ int view_dump_styled(struct source *s, int width,
 
 int view_dump(struct source *s, int width)
 {
-    return view_dump_styled(s, width, NULL, false);
+    return view_dump_styled(s, width, NULL, NULL, false, false);
 }

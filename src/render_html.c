@@ -104,7 +104,7 @@ static void decode_entity(struct rbuf *b, const char *s, size_t len,
 }
 
 static void extract_attr(const char *tag, size_t tlen, const char *attr,
-                         struct rbuf *out)
+                         struct rbuf *out, bool ascii)
 {
     size_t alen = strlen(attr);
     for (size_t i = 0; i + alen + 1 < tlen; i++) {
@@ -124,7 +124,15 @@ static void extract_attr(const char *tag, size_t tlen, const char *attr,
             size_t start = j;
             while (j < tlen && (q ? tag[j] != q : !isspace((unsigned char)tag[j])))
                 j++;
-            rbuf_putn(out, tag + start, j - start);
+            for (size_t p = start; p < j;) {
+                if (tag[p] == '&') {
+                    size_t used = 1;
+                    decode_entity(out, tag + p, j - p, &used, ascii);
+                    p += used;
+                } else {
+                    rbuf_putc(out, tag[p++]);
+                }
+            }
             return;
         }
     }
@@ -181,6 +189,10 @@ void render_html(struct rbuf *b, const char *src, size_t len,
     rbuf_init(&link_href);
     struct rbuf link_text;
     rbuf_init(&link_text);
+    struct rbuf attr_id;
+    rbuf_init(&attr_id);
+    struct rbuf heading_id;
+    rbuf_init(&heading_id);
 
     bool in_pre = false;
     size_t pre_start = 0;
@@ -287,6 +299,13 @@ void render_html(struct rbuf *b, const char *src, size_t len,
                                          : heading == 2 ? VIEW_STYLE_H2
                                                         : VIEW_STYLE_H3;
                     rbuf_blank_line(b);
+                    size_t h_anchor = b->len;
+                    if (heading_id.len > 0) {
+                        rbuf_add_anchor(b, heading_id.data, heading_id.len, h_anchor);
+                        rbuf_clear(&heading_id);
+                    }
+                    rbuf_add_heading_anchor(b, text.data ? text.data : "", text.len,
+                                            h_anchor);
                     rbuf_fill_style(&text, 0, text.len, hstyle);
                     rbuf_wrap_styled(b, &text, width, "", "", VIEW_STYLE_NONE);
                     if (heading <= 2) {
@@ -316,6 +335,21 @@ void render_html(struct rbuf *b, const char *src, size_t len,
                     rbuf_wrap_styled(b, &text, width, "", "", VIEW_STYLE_NONE);
                 }
                 rbuf_clear(&text);
+            }
+
+            if (!closing) {
+                rbuf_clear(&attr_id);
+                extract_attr(tag, tlen, "id", &attr_id, ascii);
+                if (attr_id.len == 0 && tag_eq(name, "a"))
+                    extract_attr(tag, tlen, "name", &attr_id, ascii);
+                if (attr_id.len > 0) {
+                    if (is_heading) {
+                        rbuf_clear(&heading_id);
+                        rbuf_putn(&heading_id, attr_id.data, attr_id.len);
+                    } else {
+                        rbuf_add_anchor(b, attr_id.data, attr_id.len, b->len);
+                    }
+                }
             }
 
             unsigned char isty = inline_tag_style(name);
@@ -426,16 +460,20 @@ void render_html(struct rbuf *b, const char *src, size_t len,
                     in_link = true;
                     rbuf_clear(&link_href);
                     rbuf_clear(&link_text);
-                    extract_attr(tag, tlen, "href", &link_href);
+                    extract_attr(tag, tlen, "href", &link_href, ascii);
                 } else if (in_link) {
                     flush_istyles_for(istyle, &istyle_depth, &link_text);
                     in_link = false;
                     struct rbuf *dst = in_cell ? &cell_buf : &text;
+                    size_t l0 = dst->len;
+                    size_t l1 = l0;
                     if (link_text.len > 0) {
-                        size_t l0 = dst->len;
                         rbuf_putn(dst, link_text.data, link_text.len);
                         rbuf_copy_spans(dst, l0, &link_text, 0, link_text.len);
                         rbuf_fill_style(dst, l0, dst->len, VIEW_STYLE_LINK);
+                        l1 = dst->len;
+                        if (link_href.len > 0)
+                            rbuf_add_link(dst, l0, l1, link_href.data, link_href.len);
                     }
                     if (link_href.len > 0 &&
                         !(link_href.len == link_text.len &&
@@ -445,6 +483,9 @@ void render_html(struct rbuf *b, const char *src, size_t len,
                         rbuf_putn(dst, link_href.data, link_href.len);
                         rbuf_putc(dst, ')');
                         rbuf_push_span(dst, u0, dst->len, VIEW_STYLE_LINK_URL);
+                        if (l1 == l0)
+                            rbuf_add_link(dst, u0 + 2, dst->len - 1,
+                                          link_href.data, link_href.len);
                     }
                 }
             } else if (tag_eq(name, "table")) {
@@ -495,6 +536,7 @@ void render_html(struct rbuf *b, const char *src, size_t len,
                             if (cl > 0) {
                                 rbuf_putn(&trimmed, cs + cstart, cl);
                                 rbuf_copy_spans(&trimmed, 0, &cell_buf, cstart, cl);
+                                rbuf_copy_links(&trimmed, 0, &cell_buf, cstart, cl, NULL, NULL);
                             }
                             row->cells[row->ncols++] = trimmed;
                             if (row->ncols > table.max_cols)
@@ -540,6 +582,8 @@ void render_html(struct rbuf *b, const char *src, size_t len,
     }
 
     rbuf_free(&cell_buf);
+    rbuf_free(&heading_id);
+    rbuf_free(&attr_id);
     rbuf_free(&link_text);
     rbuf_free(&link_href);
     rbuf_free(&text);

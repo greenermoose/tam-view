@@ -2,28 +2,24 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-22, with W4
+Updated: 2026-11-22, with W5
 
 STATE
 
-  0.3.1 on dev adds ANSI terminal styling for rendered Markdown, HTML,
-  and Mermaid documents plus live POSIX regex search highlighting in
-  both raw and rendered modes, using sidecar byte-offset style spans so
-  regex search, wrapping, horizontal scroll, and ESC sanitization remain
-  exact. Supports --color[=auto|always|never], --no-color, NO_COLOR,
-  TERM=dumb, TERM=linux, live C toggle, and Esc highlight clearing.
-  Added sandbox/README-sandbox for tam-idol 1.1.0 compliance; reaching
-  EOF now defaults to showing "End of file (q quit)" and waiting for q
-  (-E/--quit-at-eof restores auto-exit at EOF); dev build installed to
-  ~/.local/bin/tam-view.
+  0.4.0 on dev adds hyperlink navigation, a mode-aware attention line
+  (for rendered Markdown and HTML; plain text / raw mode keeps direct
+  Up/Down viewport scrolling), standard Tamlinux footer with line
+  numbers and right-aligned version (<path> | L<n> <top>-<bot>/<total>
+  v0.4.0), g keybindings-guide toggle, and optional OSC 8 terminal
+  hyperlinks (--hyperlinks[=auto|always|never] / --no-hyperlinks).
+  Common attention-line SGR, OSC 8, footer formatting, URI/anchor, and
+  xdg-open primitives live in libtam 0.9.0 (<tam_pager.h>).
+  Dev builds of libtam 0.9.0 and tam-view 0.4.0 installed to ~/.local.
 
 NEXT
 
-  1. 0.4.0 — Link navigation (plans/P4-link-navigation.md): keyboard
-     link cycling/following (local files, anchors, back-history,
-     external xdg-open) and optional OSC 8 terminal hyperlinks.
-  2. Install/package for Tamlinux when Fred calls for the next stage.
-  3. Later optional slices: R1 code review & man page, or additional
+  1. Install/package for Tamlinux when Fred calls for the next stage.
+  2. Later optional slices: R1 code review & man page, or additional
      Mermaid diagram types (sequence/state/subgraphs).
 
 WAITING FOR FRED
@@ -33,6 +29,7 @@ WAITING FOR FRED
 WATCH OUT
 
   Redirected stdout stays a byte-for-byte copy unless -R/--render is
-  explicitly passed, and redirected -R stays plain text unless --color
-  is also explicitly passed. Every styled row must end with SGR reset
-  (\033[0m) so the status line and shell prompt stay clean on exit.
+  explicitly passed, and redirected -R stays plain text (no SGR, no
+  OSC 8) unless --color or --hyperlinks is explicitly passed. Every
+  styled row must end with SGR reset (\033[0m) and close any open OSC 8
+  (\033]8;;\033\\) so the footer and shell prompt stay clean on exit.

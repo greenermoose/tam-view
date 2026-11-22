@@ -89,6 +89,21 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                     }
                     while (url_len > 0 && isspace((unsigned char)s[url_start + url_len - 1]))
                         url_len--;
+                    /* Strip optional angle brackets <url> and optional title after whitespace. */
+                    if (url_len >= 2 && s[url_start] == '<') {
+                        const char *gt = memchr(s + url_start + 1, '>', url_len - 1);
+                        if (gt) {
+                            url_start++;
+                            url_len = (size_t)(gt - (s + url_start));
+                        }
+                    } else {
+                        for (size_t u = 0; u < url_len; u++) {
+                            if (isspace((unsigned char)s[url_start + u])) {
+                                url_len = u;
+                                break;
+                            }
+                        }
+                    }
                     if (is_img) {
                         size_t s0 = out->len;
                         rbuf_puts(out, "[image: ");
@@ -98,7 +113,10 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                     } else {
                         size_t s0 = out->len;
                         inline_md(out, s + start, lbl_len);
-                        rbuf_fill_style(out, s0, out->len, VIEW_STYLE_LINK);
+                        size_t s1 = out->len;
+                        rbuf_fill_style(out, s0, s1, VIEW_STYLE_LINK);
+                        if (url_len > 0 && s1 > s0)
+                            rbuf_add_link(out, s0, s1, s + url_start, url_len);
                         if (url_len > 0 &&
                             !(url_len == lbl_len &&
                               memcmp(s + start, s + url_start, url_len) == 0)) {
@@ -107,9 +125,31 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                             rbuf_putn(out, s + url_start, url_len);
                             rbuf_putc(out, ')');
                             rbuf_push_span(out, u0, out->len, VIEW_STYLE_LINK_URL);
+                            if (s1 == s0)
+                                rbuf_add_link(out, u0 + 2, out->len - 1,
+                                              s + url_start, url_len);
                         }
                     }
                     i = url_end + 1;
+                    continue;
+                }
+            }
+        }
+        if (s[i] == '<') {
+            size_t gt = i + 1;
+            while (gt < len && s[gt] != '>' && !isspace((unsigned char)s[gt]))
+                gt++;
+            if (gt < len && s[gt] == '>') {
+                size_t ulen = gt - (i + 1);
+                const char *u = s + i + 1;
+                if ((ulen > 7 && strncasecmp(u, "http://", 7) == 0) ||
+                    (ulen > 8 && strncasecmp(u, "https://", 8) == 0) ||
+                    (ulen > 7 && strncasecmp(u, "mailto:", 7) == 0)) {
+                    size_t s0 = out->len;
+                    rbuf_putn(out, u, ulen);
+                    rbuf_push_span(out, s0, out->len, VIEW_STYLE_LINK);
+                    rbuf_add_link(out, s0, out->len, u, ulen);
+                    i = gt + 1;
                     continue;
                 }
             }
@@ -315,11 +355,13 @@ static void emit_heading(struct rbuf *b, int level, const char *text,
                          : level == 2 ? VIEW_STYLE_H2
                                       : VIEW_STYLE_H3;
     rbuf_blank_line(b);
+    size_t anchor_byte = b->len;
     struct rbuf tmp;
     rbuf_init(&tmp);
     inline_md(&tmp, text, len);
     rbuf_fill_style(&tmp, 0, tmp.len, hstyle);
     const char *s = tmp.data ? tmp.data : "";
+    rbuf_add_heading_anchor(b, s, tmp.len, anchor_byte);
 
     if (level <= 2) {
         rbuf_wrap_styled(b, &tmp, width, "", "", VIEW_STYLE_NONE);

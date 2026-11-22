@@ -21,8 +21,8 @@ $(BUILD)/%.o: src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -MMD -MP -c -o $@ $<
 
-$(BUILD)/main.o: CPPFLAGS += -DVIEW_VERSION='"$(VERSION)"'
-$(BUILD)/main.o: VERSION
+$(BUILD)/main.o $(BUILD)/pager.o: CPPFLAGS += -DVIEW_VERSION='"$(VERSION)"'
+$(BUILD)/main.o $(BUILD)/pager.o: VERSION
 
 $(BUILD)/test-layout: tests/test-layout.c $(BUILD)/layout.o $(BUILD)/source.o $(LIBTAM)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^

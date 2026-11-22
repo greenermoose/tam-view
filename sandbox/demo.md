@@ -1,6 +1,6 @@
-# Tam-View 0.2.0 Demo
+# Tam-View 0.4.0 Demo
 
-Welcome to **tam-view**! This is a *Markdown* document with `inline code`, a [Tamlinux link](https://tamlinux.org), and wrapped paragraphs that adapt to your terminal width.
+Welcome to **tam-view**! This is a *Markdown* document with `inline code`, an external [Tamlinux link](https://tamlinux.org), a local [HTML Demo](page.html), and an in-document jump to the [Comparison Table](#comparison-table). Press `Down`/`Up` to move the attention line, `Right` to follow a highlighted link, `Left` to return, and `g` for the keybindings guide.
 
 ## Features
 

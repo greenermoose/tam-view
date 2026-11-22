@@ -125,6 +125,7 @@ int main(void)
             .doc_count = doc.count,
             .search_spans = srch.spans,
             .search_count = srch.count,
+            .focused_link = -1,
             .linux_vt = false
         };
         char out[1024];
@@ -148,6 +149,52 @@ int main(void)
 
         view_styles_free(&doc);
         view_styles_free(&srch);
+        source_close(&s);
+        fclose(fp);
+    }
+
+    // Attention line, focused link highlight, and OSC 8 hyperlinks.
+    {
+        FILE *fp = tmpfile();
+        assert(fp);
+        const char *txt = "See Tamlinux docs\n";
+        assert(fwrite(txt, 1, strlen(txt), fp) == strlen(txt));
+        assert(fflush(fp) == 0);
+        rewind(fp);
+        struct source s;
+        assert(source_open(&s, fileno(fp)) == 0);
+
+        struct view_links lk = {0};
+        ssize_t idx = view_links_add_item(&lk, "https://tamlinux.org", 20, 4);
+        assert(idx == 0);
+        assert(view_links_push_span(&lk, 4, 12, 0));
+
+        struct view_row_style rs = {
+            .links = &lk,
+            .focused_link = 0,
+            .attention = true,
+            .linux_vt = false,
+            .osc8 = true
+        };
+        char out[8192];
+        struct position next;
+        assert(view_row_styled(&s, (struct position){0}, 20, 0, false, &rs,
+                               out, &next) == VIEW_ROW);
+        assert(strstr(out, "\033[38;5;15;48;5;236m") != NULL);
+        assert(strstr(out, "\033]8;;https://tamlinux.org\033\\") != NULL);
+        assert(strstr(out, "\033[1;30;46mTamlinux") != NULL);
+        assert(strstr(out, "\033]8;;\033\\") != NULL);
+        assert(strcmp(out + strlen(out) - 4, "\033[0m") == 0);
+
+        // Linux VT attention uses reverse (\033[7m) and no OSC 8 when osc8=false.
+        rs.linux_vt = true;
+        rs.osc8 = false;
+        assert(view_row_styled(&s, (struct position){0}, 20, 0, false, &rs,
+                               out, &next) == VIEW_ROW);
+        assert(strstr(out, "\033[7m") != NULL);
+        assert(strstr(out, "\033]8;;") == NULL);
+
+        view_links_free(&lk);
         source_close(&s);
         fclose(fp);
     }

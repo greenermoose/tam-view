@@ -1,6 +1,7 @@
 #include "view.h"
 
 #include <tam_key.h>
+#include <tam_pager.h>
 #include <tam_tty.h>
 #include <tam_uni.h>
 
@@ -13,6 +14,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -22,6 +24,8 @@
 #define MARK_COUNT 53
 #define MARK_PREV 52
 #define LINE_BUF_MAX (16 * 1024 * 1024)
+#define ROW_INDEX_MAX_BYTES (4 * 1024 * 1024)
+#define HISTORY_MAX 256
 
 enum job { IDLE, ADVANCE, GO_LINE, GO_END, SEARCH };
 enum prompt {
@@ -50,11 +54,22 @@ struct mark {
     int h_offset;
 };
 
+struct nav_entry {
+    size_t file_index;
+    struct position top;
+    struct position attn;
+    int h_offset;
+    bool render_mode;
+};
+
 struct file_entry {
     const char *path;
+    bool own_path;
     struct source source;
     struct source rendered;
     struct view_styles rendered_styles;
+    struct view_links rendered_links;
+    enum view_format rendered_format;
     bool has_rendered;
     int rendered_width;
     bool render_mode;
@@ -64,7 +79,16 @@ struct file_entry {
     bool opened;
     bool own_fd;
     struct position top;
+    struct position attn;
     int h_offset;
+    struct position *row_index;
+    size_t row_count;
+    size_t row_cap;
+    bool row_index_valid;
+    int row_index_width;
+    int row_index_h_offset;
+    bool row_index_chop;
+    bool row_index_render;
 };
 
 struct search {
@@ -84,13 +108,21 @@ struct pager {
     struct source *source;
     struct file_entry *files;
     size_t file_count;
+    size_t file_cap;
+    size_t cli_file_count;
     size_t file_index;
     tam_tty_t tty;
     tam_key_parser_t keys;
     struct frame current;
     struct frame next;
     struct position top;
+    struct position attn;
     struct position cursor;
+    ssize_t focused_link;
+    int help_offset;
+    struct nav_entry *history;
+    size_t history_count;
+    size_t history_cap;
     int height;
     int width;
     int h_offset;
@@ -304,6 +336,219 @@ static void collect_line_matches(struct pager *p, off_t ls,
     }
 }
 
+static bool has_attention_line(const struct pager *p)
+{
+    const struct file_entry *cur = &p->files[p->file_index];
+    return cur->render_mode && cur->has_rendered &&
+           (cur->rendered_format == VIEW_FORMAT_MARKDOWN ||
+            cur->rendered_format == VIEW_FORMAT_HTML);
+}
+
+static const struct view_links *active_links(const struct pager *p)
+{
+    const struct file_entry *cur = &p->files[p->file_index];
+    return (cur->render_mode && cur->has_rendered &&
+            cur->rendered_links.count > 0)
+           ? &cur->rendered_links : NULL;
+}
+
+static bool active_osc8(const struct pager *p)
+{
+    if (p->opts.hyperlinks_mode == VIEW_HYPERLINKS_ALWAYS)
+        return true;
+    if (p->opts.hyperlinks_mode == VIEW_HYPERLINKS_NEVER)
+        return false;
+    return p->opts.hyperlinks && p->opts.color;
+}
+
+static void invalidate_row_index(struct file_entry *f)
+{
+    f->row_index_valid = false;
+}
+
+static void ensure_row_index(struct pager *p)
+{
+    struct file_entry *cur = &p->files[p->file_index];
+    if (cur->row_index_valid &&
+        cur->row_index_width == p->width &&
+        cur->row_index_h_offset == p->h_offset &&
+        cur->row_index_chop == p->chop &&
+        cur->row_index_render == cur->render_mode) {
+        return;
+    }
+    cur->row_index_valid = false;
+    if (!p->source->eof)
+        return;
+    off_t sz = source_size(p->source);
+    if (sz < 0 || sz > ROW_INDEX_MAX_BYTES)
+        return;
+
+    cur->row_count = 0;
+    struct position pos = {0};
+    for (;;) {
+        struct position next;
+        int r = view_row_h(p->source, pos, p->width, p->h_offset, p->chop,
+                           NULL, &next);
+        if (r != VIEW_ROW)
+            break;
+        if (cur->row_count == cur->row_cap) {
+            size_t ncap = cur->row_cap ? cur->row_cap * 2 : 128;
+            struct position *grown = realloc(cur->row_index, ncap * sizeof(*grown));
+            if (!grown)
+                return;
+            cur->row_index = grown;
+            cur->row_cap = ncap;
+        }
+        cur->row_index[cur->row_count++] = pos;
+        pos = next;
+    }
+    cur->row_index_width = p->width;
+    cur->row_index_h_offset = p->h_offset;
+    cur->row_index_chop = p->chop;
+    cur->row_index_render = cur->render_mode;
+    cur->row_index_valid = true;
+}
+
+static size_t row_index_lookup(const struct file_entry *cur, struct position pos)
+{
+    if (!cur->row_index_valid || cur->row_count == 0)
+        return 0;
+    size_t lo = 0, hi = cur->row_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (position_compare(cur->row_index[mid], pos) < 0)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < cur->row_count)
+        return lo + 1;
+    return cur->row_count;
+}
+
+static bool row_byte_range(struct pager *p, struct position row,
+                           off_t *start_out, off_t *end_out)
+{
+    struct position next;
+    if (view_row_h(p->source, row, p->width, p->h_offset, p->chop,
+                   NULL, &next) != VIEW_ROW)
+        return false;
+    *start_out = row.byte;
+    *end_out = next.byte;
+    return true;
+}
+
+static ssize_t find_link_on_row(struct pager *p, struct position row, bool last)
+{
+    const struct view_links *lk = active_links(p);
+    if (!lk || lk->span_count == 0)
+        return -1;
+    off_t rs = 0, re = 0;
+    if (!row_byte_range(p, row, &rs, &re) || re <= rs)
+        return -1;
+
+    size_t lo = 0, hi = lk->span_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (lk->spans[mid].end <= rs)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    ssize_t found = -1;
+    for (size_t i = lo; i < lk->span_count && lk->spans[i].start < re; i++) {
+        found = (ssize_t)lk->spans[i].link_index;
+        if (!last)
+            return found;
+    }
+    return found;
+}
+
+static bool step_link_on_row(struct pager *p, int dir)
+{
+    const struct view_links *lk = active_links(p);
+    if (!lk || lk->span_count == 0)
+        return false;
+    off_t rs = 0, re = 0;
+    if (!row_byte_range(p, p->attn, &rs, &re) || re <= rs)
+        return false;
+
+    ssize_t first = -1, last = -1, prev = -1, next = -1;
+    bool on_row = false;
+    size_t lo = 0, hi = lk->span_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (lk->spans[mid].end <= rs)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (size_t i = lo; i < lk->span_count && lk->spans[i].start < re; i++) {
+        ssize_t idx = (ssize_t)lk->spans[i].link_index;
+        if (first < 0)
+            first = idx;
+        last = idx;
+        if (idx < p->focused_link)
+            prev = idx;
+        else if (idx == p->focused_link)
+            on_row = true;
+        else if (next < 0)
+            next = idx;
+    }
+    if (first < 0)
+        return false;
+    if (!on_row) {
+        p->focused_link = dir > 0 ? first : last;
+        return true;
+    }
+    if (dir > 0) {
+        if (next < 0)
+            return false;
+        p->focused_link = next;
+        return true;
+    }
+    if (prev < 0)
+        return false;
+    p->focused_link = prev;
+    return true;
+}
+
+static void catch_link_on_attn(struct pager *p, int dir)
+{
+    if (!has_attention_line(p)) {
+        p->focused_link = -1;
+        return;
+    }
+    p->focused_link = find_link_on_row(p, p->attn, dir < 0);
+}
+
+static const char *const HELP_LINES[] = {
+    "tam-view keybindings guide (press g, h, or Esc to close)",
+    "",
+    "  Down / j               Next line (or attention line / link in Markup)",
+    "  Up / k                 Previous line (or attention line / link in Markup)",
+    "  Space / Page Down      Next page",
+    "  b / Page Up            Previous page",
+    "  d / u                  Half page down / up",
+    "  Right / Enter / o      Follow highlighted link (Right scrolls if no link)",
+    "  Left / Backspace       Return in link history (Left scrolls if shifted)",
+    "  Tab / Shift-Tab        Jump to next / previous link in document",
+    "  Shift-Left / -Right    Scroll horizontally",
+    "  S                      Toggle chop long lines",
+    "  Home / < / 1g          Start of file",
+    "  G / End                End of file",
+    "  Ng                     Go to file line N (e.g. 42g)",
+    "  m<a-z> / '<a-z> / ''   Set mark / go to mark / previous position",
+    "  /regex / ?regex        Find POSIX regex forward / backward",
+    "  n / N / Esc            Repeat / reverse / clear highlight",
+    "  :n / :p / :x / :f      Next / prev / first / current file",
+    "  R / C                  Toggle rendered view / color",
+    "  F                      Follow growing file or pipe (Ctrl-C stops)",
+    "  g / h                  Toggle this keybindings guide",
+    "  q                      Quit and keep the page"
+};
+#define HELP_LINE_COUNT (sizeof(HELP_LINES) / sizeof(HELP_LINES[0]))
+
 static int build_page(struct pager *p, struct position *end)
 {
     struct frame *f = &p->next;
@@ -312,28 +557,16 @@ static int build_page(struct pager *p, struct position *end)
     f->valid = true;
     *end = p->top;
     if (!f->document) {
-        static const char *const help[] = {
-            "tam-view keys",
-            "j / Down / Enter       Next line",
-            "k / Up                 Previous line",
-            "Space / Page Down      Next page",
-            "b / Page Up            Previous page",
-            "d / u                  Half page down / up",
-            "Left / Right           Scroll horizontally",
-            "S                      Toggle chop long lines",
-            "g / G / Ng             Start / end / line N",
-            "m<a-z> / '<a-z> / ''   Set mark / go to mark / previous",
-            "/ / ?                  Find POSIX regex forward / backward",
-            "n / N / Esc            Repeat / reverse / clear highlight",
-            ":n / :p / :x / :f      Next / prev / first / current file",
-            "R / C                  Toggle rendered view / color",
-            "F                      Follow growing file or pipe",
-            "q                      Quit and keep the page"
-        };
-        for (size_t i = 0; i < sizeof(help) / sizeof(help[0]) &&
-                           f->count < p->height; i++, f->count++) {
+        int max_off = (int)HELP_LINE_COUNT > p->height
+                      ? (int)HELP_LINE_COUNT - p->height : 0;
+        if (p->help_offset < 0)
+            p->help_offset = 0;
+        if (p->help_offset > max_off)
+            p->help_offset = max_off;
+        for (size_t i = (size_t)p->help_offset;
+             i < HELP_LINE_COUNT && f->count < p->height; i++, f->count++) {
             view_label(f->text + f->count * f->stride, f->stride,
-                       p->width, help[i]);
+                       p->width, HELP_LINES[i]);
         }
         return VIEW_ROW;
     }
@@ -342,6 +575,9 @@ static int build_page(struct pager *p, struct position *end)
     const struct view_styles *doc_st =
         (p->opts.color && cur->render_mode && cur->has_rendered)
         ? &cur->rendered_styles : NULL;
+    const struct view_links *lk = active_links(p);
+    bool attn_mode = has_attention_line(p);
+    bool want_osc8 = lk && active_osc8(p);
     bool want_search = p->opts.color && p->search.valid && p->search.highlight;
     struct view_styles line_matches = {0};
     off_t cached_ls = -1;
@@ -357,15 +593,21 @@ static int build_page(struct pager *p, struct position *end)
                 cached_ls = ls;
             }
         }
+        bool is_attn = attn_mode && p->opts.color && position_equal(row, p->attn);
         struct view_row_style rs = {
             .doc_spans = doc_st ? doc_st->spans : NULL,
             .doc_count = doc_st ? doc_st->count : 0,
             .search_spans = want_search ? line_matches.spans : NULL,
             .search_count = want_search ? line_matches.count : 0,
-            .linux_vt = p->opts.linux_vt
+            .links = lk,
+            .focused_link = (p->opts.color && attn_mode) ? p->focused_link : -1,
+            .attention = is_attn,
+            .linux_vt = p->opts.linux_vt,
+            .osc8 = want_osc8
         };
         const struct view_row_style *rsp =
-            (rs.doc_count > 0 || rs.search_count > 0) ? &rs : NULL;
+            (rs.doc_count > 0 || rs.search_count > 0 || rs.attention ||
+             (rs.links && (rs.focused_link >= 0 || rs.osc8))) ? &rs : NULL;
         int result = view_row_styled(p->source, row, p->width,
                                      p->h_offset, p->chop, rsp,
                                      f->text + f->count * f->stride, end);
@@ -391,7 +633,7 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
     const char *message = p->message;
     char text[SEARCH_SIZE + 80];
     if (p->prompt == HELP) {
-        message = "Press any key to return";
+        message = "Keybindings guide (g to close, q to quit)";
     } else if (p->prompt == MARK_SET) {
         message = "mark: ";
     } else if (p->prompt == MARK_GOTO) {
@@ -412,15 +654,60 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
         snprintf(text, sizeof(text), "%ju", (uintmax_t)p->count);
         message = text;
     } else if (!message) {
-        char name[SEARCH_SIZE + 1];
-        view_label(name, sizeof(name), p->width, p->label);
-        if (p->file_count > 1) {
-            snprintf(text, sizeof(text), "(file %zu of %zu) %s",
-                     p->file_index + 1, p->file_count, name);
-            view_label(out, cap, p->width, text);
+        struct file_entry *cur = &p->files[p->file_index];
+        ensure_row_index(p);
+
+        char label_buf[SEARCH_SIZE + 64];
+        if (p->cli_file_count > 1 && p->file_index < p->cli_file_count) {
+            snprintf(label_buf, sizeof(label_buf), "(file %zu of %zu) %s",
+                     p->file_index + 1, p->cli_file_count, p->label);
         } else {
-            snprintf(out, cap, "%s", name);
+            snprintf(label_buf, sizeof(label_buf), "%s", p->label);
         }
+
+        size_t top_line = 0, bot_line = 0, attn_line = 0, total_lines = 0;
+        bool total_known = cur->row_index_valid;
+        if (total_known) {
+            total_lines = cur->row_count;
+            if (p->next.count > 0 && total_lines > 0) {
+                top_line = row_index_lookup(cur, p->next.rows[0]);
+                bot_line = top_line + (size_t)p->next.count - 1;
+                if (bot_line > total_lines)
+                    bot_line = total_lines;
+                attn_line = row_index_lookup(cur, p->attn);
+                if (attn_line == 0)
+                    attn_line = top_line;
+            }
+        } else if (p->next.count > 0) {
+            top_line = 1;
+            bot_line = (size_t)p->next.count;
+            attn_line = 1;
+            for (int i = 0; i < p->next.count; i++) {
+                if (position_equal(p->next.rows[i], p->attn)) {
+                    attn_line = (size_t)i + 1;
+                    break;
+                }
+            }
+        }
+
+        const struct view_links *lk = active_links(p);
+        const char *hint = (has_attention_line(p) && lk &&
+                            p->focused_link >= 0 &&
+                            (size_t)p->focused_link < lk->count)
+                           ? lk->items[p->focused_link].url : NULL;
+
+        tam_pager_footer_t footer = {
+            .label = label_buf,
+            .has_attn = has_attention_line(p),
+            .attn_line = attn_line,
+            .top_line = top_line,
+            .bot_line = bot_line,
+            .total_lines = total_lines,
+            .total_known = total_known,
+            .link_hint = hint,
+            .version = VIEW_VERSION
+        };
+        tam_pager_format_footer(out, cap, p->width, &footer);
         return;
     }
     if (p->prompt == FIND_FORWARD || p->prompt == FIND_BACKWARD) {
@@ -442,11 +729,13 @@ static int paint(struct pager *p)
     int state = build_page(p, &end);
     if (state == VIEW_ERROR)
         return -1;
-    bool at_last_file = p->file_index + 1 >= p->file_count;
+    bool at_last_file = p->file_index >= p->cli_file_count ||
+                        p->file_index + 1 >= p->cli_file_count;
     bool eof_doc = state == VIEW_EOF && p->next.document;
     bool final = p->opts.quit_at_eof && eof_doc && !p->following &&
                  !p->hold_eof && at_last_file;
-    if (eof_doc && !p->following && !final && !p->message) {
+    if (eof_doc && !p->following && !final && !p->message &&
+        !has_attention_line(p)) {
         p->message = at_last_file ? "End of file (q quit)"
                                   : "End of file (:n next, q quit)";
     }
@@ -461,6 +750,25 @@ static int paint(struct pager *p)
         if (back(p, end, p->height, &p->top) < 0 ||
             build_page(p, &end) == VIEW_ERROR)
             return -1;
+    }
+
+    if (has_attention_line(p) && p->next.document && p->next.count > 0) {
+        bool in_view = false;
+        for (int i = 0; i < p->next.count; i++) {
+            if (position_equal(p->next.rows[i], p->attn)) {
+                in_view = true;
+                break;
+            }
+        }
+        if (!in_view) {
+            if (position_compare(p->attn, p->next.rows[0]) < 0)
+                p->attn = p->next.rows[0];
+            else
+                p->attn = p->next.rows[p->next.count - 1];
+            catch_link_on_attn(p, 1);
+            if (build_page(p, &end) == VIEW_ERROR)
+                return -1;
+        }
     }
 
     struct frame *old = &p->current;
@@ -577,13 +885,17 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
     if (f->has_rendered) {
         source_close(&f->rendered);
         view_styles_free(&f->rendered_styles);
+        view_links_free(&f->rendered_links);
         f->has_rendered = false;
+        f->rendered_format = VIEW_FORMAT_RAW;
     }
     if (view_render_source(&f->source, f->path, p->width, p->opts.ascii,
                            f->force_render, &f->rendered,
-                           &f->rendered_styles) == 0) {
+                           &f->rendered_styles, &f->rendered_links,
+                           &f->rendered_format) == 0) {
         f->has_rendered = true;
         f->rendered_width = p->width;
+        invalidate_row_index(f);
     } else {
         f->render_mode = false;
         snprintf(p->message_buf, sizeof(p->message_buf),
@@ -603,6 +915,7 @@ static int switch_file(struct pager *p, size_t target)
 
     struct file_entry *cur = &p->files[p->file_index];
     cur->top = p->top;
+    cur->attn = p->attn;
     cur->h_offset = p->h_offset;
 
     struct file_entry *dst = &p->files[target];
@@ -652,16 +965,309 @@ static int switch_file(struct pager *p, size_t target)
     p->file_index = target;
     p->source = active_source(dst);
     p->top = dst->top;
+    p->attn = dst->attn;
     p->h_offset = dst->h_offset;
     p->label = dst->path;
     p->message = NULL;
     p->search.hit = -1;
+    p->focused_link = -1;
     p->following = false;
     p->hold_eof = false;
     p->job = IDLE;
     p->current.valid = false;
     p->dirty = true;
-    return align(p, p->top, &p->top);
+    if (align(p, p->top, &p->top) < 0)
+        return -1;
+    if (align(p, p->attn, &p->attn) < 0)
+        return -1;
+    catch_link_on_attn(p, 1);
+    return 0;
+}
+
+static void push_history(struct pager *p)
+{
+    struct file_entry *cur = &p->files[p->file_index];
+    if (p->history_count >= HISTORY_MAX) {
+        memmove(&p->history[0], &p->history[1],
+                (p->history_count - 1) * sizeof(p->history[0]));
+        p->history_count--;
+    } else if (p->history_count == p->history_cap) {
+        size_t ncap = p->history_cap ? p->history_cap * 2 : 16;
+        struct nav_entry *grown = realloc(p->history, ncap * sizeof(*grown));
+        if (!grown)
+            return;
+        p->history = grown;
+        p->history_cap = ncap;
+    }
+    p->history[p->history_count++] = (struct nav_entry){
+        .file_index = p->file_index,
+        .top = p->top,
+        .attn = p->attn,
+        .h_offset = p->h_offset,
+        .render_mode = cur->render_mode
+    };
+}
+
+static int jump_to_anchor(struct pager *p, const char *frag, bool record_history)
+{
+    struct file_entry *cur = &p->files[p->file_index];
+    if (!cur->render_mode || !cur->has_rendered) {
+        p->message = "Anchors require rendered view";
+        return 0;
+    }
+    char decoded[256];
+    tam_uri_percent_decode(frag, strlen(frag), decoded, sizeof(decoded));
+    const struct view_links *lk = &cur->rendered_links;
+    for (size_t i = 0; i < lk->anchor_count; i++) {
+        if (strcasecmp(lk->anchors[i].id, decoded) == 0) {
+            if (record_history)
+                push_history(p);
+            save_jump_mark(p);
+            struct position target = {.byte = lk->anchors[i].byte};
+            if (align(p, target, &p->top) < 0)
+                return -1;
+            p->attn = p->top;
+            p->h_offset = 0;
+            p->search.hit = -1;
+            p->current.valid = false;
+            catch_link_on_attn(p, 1);
+            return 0;
+        }
+    }
+    snprintf(p->message_buf, sizeof(p->message_buf),
+             "Anchor not found: #%s", decoded);
+    p->message = p->message_buf;
+    return 0;
+}
+
+static ssize_t find_or_add_file(struct pager *p, const char *path)
+{
+    for (size_t i = 0; i < p->file_count; i++) {
+        if (strcmp(p->files[i].path, path) == 0)
+            return (ssize_t)i;
+    }
+    if (p->file_count == p->file_cap) {
+        size_t ncap = p->file_cap ? p->file_cap * 2 : 8;
+        struct file_entry *grown = realloc(p->files, ncap * sizeof(*grown));
+        if (!grown) {
+            p->message = "Out of memory";
+            return -1;
+        }
+        p->files = grown;
+        p->file_cap = ncap;
+        p->source = active_source(&p->files[p->file_index]);
+    }
+    char *copy = strdup(path);
+    if (!copy) {
+        p->message = "Out of memory";
+        return -1;
+    }
+    size_t idx = p->file_count++;
+    p->files[idx] = (struct file_entry){
+        .path = copy,
+        .own_path = true,
+        .fd = -1
+    };
+    return (ssize_t)idx;
+}
+
+static int follow_focused_link(struct pager *p)
+{
+    const struct view_links *lk = active_links(p);
+    if (!lk || p->focused_link < 0 || (size_t)p->focused_link >= lk->count) {
+        p->message = "No link highlighted";
+        return 0;
+    }
+    const char *url = lk->items[p->focused_link].url;
+    tam_uri_kind_t kind = tam_uri_classify(url);
+    if (kind == TAM_URI_INVALID) {
+        p->message = "Unsupported link scheme";
+        return 0;
+    }
+    if (kind == TAM_URI_EXTERNAL) {
+        if (tam_uri_open_external(url) < 0) {
+            p->message = "Could not open external link";
+            return 0;
+        }
+        char safe[SEARCH_SIZE];
+        view_label(safe, sizeof(safe), p->width > 10 ? p->width - 10 : 40, url);
+        snprintf(p->message_buf, sizeof(p->message_buf), "Opened: %s", safe);
+        p->message = p->message_buf;
+        return 0;
+    }
+    if (kind == TAM_URI_ANCHOR)
+        return jump_to_anchor(p, url + 1, true);
+
+    char target_path[4096];
+    char frag[256];
+    if (tam_uri_resolve_local(p->files[p->file_index].path, url,
+                              target_path, sizeof(target_path),
+                              frag, sizeof(frag)) < 0) {
+        p->message = "Invalid link path";
+        return 0;
+    }
+    if (target_path[0] == '\0')
+        return frag[0] ? jump_to_anchor(p, frag, true) : 0;
+
+    size_t prev_count = p->file_count;
+    ssize_t target_idx = find_or_add_file(p, target_path);
+    if (target_idx < 0)
+        return 0;
+
+    push_history(p);
+    if (switch_file(p, (size_t)target_idx) < 0) {
+        if (p->history_count > 0)
+            p->history_count--;
+        if ((size_t)target_idx == prev_count && p->file_count > prev_count) {
+            if (p->files[target_idx].own_path)
+                free((void *)p->files[target_idx].path);
+            p->file_count = prev_count;
+        }
+        return 0;
+    }
+    if (frag[0])
+        return jump_to_anchor(p, frag, false);
+    return 0;
+}
+
+static int go_back(struct pager *p)
+{
+    if (p->history_count == 0) {
+        p->message = "No link history";
+        return 0;
+    }
+    struct nav_entry e = p->history[--p->history_count];
+    if (e.file_index != p->file_index && switch_file(p, e.file_index) < 0)
+        return 0;
+    struct file_entry *cur = &p->files[p->file_index];
+    if (cur->render_mode != e.render_mode) {
+        cur->render_mode = e.render_mode;
+        if (cur->render_mode)
+            ensure_rendered(p, cur);
+        p->source = active_source(cur);
+        invalidate_row_index(cur);
+    }
+    p->top = e.top;
+    p->attn = e.attn;
+    p->h_offset = e.h_offset;
+    p->search.hit = -1;
+    p->current.valid = false;
+    if (align(p, p->top, &p->top) < 0 || align(p, p->attn, &p->attn) < 0)
+        return -1;
+    catch_link_on_attn(p, 1);
+    return 0;
+}
+
+static int move_attn_down(struct pager *p)
+{
+    if (step_link_on_row(p, 1)) {
+        p->current.valid = false;
+        return 0;
+    }
+    struct position next;
+    int r = view_row_h(p->source, p->attn, p->width, p->h_offset, p->chop,
+                       NULL, &next);
+    if (r != VIEW_ROW)
+        return r == VIEW_ERROR ? -1 : 0;
+    if (next.tab_left == 0) {
+        int b = source_byte(p->source, next.byte);
+        if (b == VIEW_EOF)
+            return 0;
+        if (b < 0)
+            return b == VIEW_ERROR ? -1 : 0;
+    }
+    p->attn = next;
+    bool in_view = false;
+    if (p->current.valid && p->current.document) {
+        for (int i = 0; i < p->current.count; i++) {
+            if (position_equal(p->current.rows[i], p->attn)) {
+                in_view = true;
+                break;
+            }
+        }
+    }
+    if (!in_view) {
+        struct position new_top;
+        if (view_row_h(p->source, p->top, p->width, p->h_offset, p->chop,
+                       NULL, &new_top) == VIEW_ROW) {
+            p->top = new_top;
+        }
+    }
+    catch_link_on_attn(p, 1);
+    p->current.valid = false;
+    return 0;
+}
+
+static int move_attn_up(struct pager *p)
+{
+    if (step_link_on_row(p, -1)) {
+        p->current.valid = false;
+        return 0;
+    }
+    if (p->attn.byte == 0 && p->attn.tab_left == 0)
+        return 0;
+    struct position prev;
+    if (back(p, p->attn, 1, &prev) < 0)
+        return -1;
+    p->attn = prev;
+    if (position_compare(p->attn, p->top) < 0)
+        p->top = p->attn;
+    catch_link_on_attn(p, -1);
+    p->current.valid = false;
+    return 0;
+}
+
+static int cycle_link(struct pager *p, int dir)
+{
+    const struct view_links *lk = active_links(p);
+    if (!lk || lk->count == 0) {
+        p->message = "No links in document";
+        return 0;
+    }
+    ssize_t target = -1;
+    if (p->focused_link < 0) {
+        if (dir > 0) {
+            for (size_t i = 0; i < lk->count; i++) {
+                if (lk->items[i].first_byte >= p->attn.byte) {
+                    target = (ssize_t)i;
+                    break;
+                }
+            }
+            if (target < 0)
+                target = 0;
+        } else {
+            for (size_t i = lk->count; i > 0; i--) {
+                if (lk->items[i - 1].first_byte <= p->attn.byte) {
+                    target = (ssize_t)(i - 1);
+                    break;
+                }
+            }
+            if (target < 0)
+                target = (ssize_t)(lk->count - 1);
+        }
+    } else if (dir > 0) {
+        target = (p->focused_link + 1) % (ssize_t)lk->count;
+    } else {
+        target = (p->focused_link + (ssize_t)lk->count - 1) % (ssize_t)lk->count;
+    }
+
+    p->focused_link = target;
+    struct position lpos = {.byte = lk->items[target].first_byte};
+    if (align(p, lpos, &p->attn) < 0)
+        return -1;
+    bool in_view = false;
+    if (p->current.valid && p->current.document) {
+        for (int i = 0; i < p->current.count; i++) {
+            if (position_equal(p->current.rows[i], p->attn)) {
+                in_view = true;
+                break;
+            }
+        }
+    }
+    if (!in_view)
+        p->top = p->attn;
+    p->current.valid = false;
+    return 0;
 }
 
 static bool compile_regex(struct pager *p, const char *pattern)
@@ -849,6 +1455,8 @@ static int step_search(struct pager *p)
             struct position hit = {.byte = find->hit};
             if (align(p, hit, &p->top) < 0)
                 return VIEW_ERROR;
+            p->attn = p->top;
+            catch_link_on_attn(p, 1);
             p->job = IDLE;
             p->dirty = true;
             return VIEW_ROW;
@@ -876,7 +1484,14 @@ static int last_page(struct pager *p, struct position end)
 {
     p->job = IDLE;
     p->dirty = true;
-    return back(p, end, p->height, &p->top);
+    if (back(p, end, p->height, &p->top) < 0)
+        return -1;
+    if (has_attention_line(p)) {
+        if (back(p, end, 1, &p->attn) < 0)
+            return -1;
+        catch_link_on_attn(p, -1);
+    }
+    return 0;
 }
 
 static int step_job(struct pager *p)
@@ -914,6 +1529,11 @@ static int step_job(struct pager *p)
                 return next;
         }
         p->top = p->cursor;
+        if (has_attention_line(p)) {
+            p->attn = p->top;
+            catch_link_on_attn(p, 1);
+            p->current.valid = false;
+        }
         p->scroll = true;
         p->dirty = true;
         p->job = IDLE;
@@ -933,6 +1553,11 @@ static int step_job(struct pager *p)
         p->cursor.byte++;
         if (p->job == GO_LINE && b == '\n' && --p->remaining == 0) {
             p->top = p->cursor;
+            if (has_attention_line(p)) {
+                p->attn = p->top;
+                catch_link_on_attn(p, 1);
+                p->current.valid = false;
+            }
             break;
         }
         if (i == VIEW_BLOCK - 1)
@@ -1026,21 +1651,23 @@ static void handle_colon_prompt(struct pager *p, tam_key_event_t key, int c,
 
     if (c == 'n') {
         size_t step = count ? (size_t)count : 1;
-        if (p->file_index + step >= p->file_count || count > SIZE_MAX) {
+        if (p->file_index >= p->cli_file_count ||
+            p->file_index + step >= p->cli_file_count || count > SIZE_MAX) {
             p->message = "No next file";
             return;
         }
         (void)switch_file(p, p->file_index + step);
     } else if (c == 'p') {
         size_t step = count ? (size_t)count : 1;
-        if (step > p->file_index || count > SIZE_MAX) {
+        if (p->file_index >= p->cli_file_count ||
+            step > p->file_index || count > SIZE_MAX) {
             p->message = "No previous file";
             return;
         }
         (void)switch_file(p, p->file_index - step);
     } else if (c == 'x') {
         size_t target = count ? (size_t)(count - 1) : 0;
-        if (target >= p->file_count || count > SIZE_MAX) {
+        if (target >= p->cli_file_count || count > SIZE_MAX) {
             p->message = "No such file";
             return;
         }
@@ -1048,10 +1675,10 @@ static void handle_colon_prompt(struct pager *p, tam_key_event_t key, int c,
     } else if (c == 'f') {
         char name[SEARCH_SIZE + 1];
         view_label(name, sizeof(name), p->width, p->label);
-        if (p->file_count > 1) {
+        if (p->cli_file_count > 1 && p->file_index < p->cli_file_count) {
             snprintf(p->message_buf, sizeof(p->message_buf),
                      "file %zu of %zu: %s", p->file_index + 1,
-                     p->file_count, name);
+                     p->cli_file_count, name);
         } else {
             snprintf(p->message_buf, sizeof(p->message_buf), "%s", name);
         }
@@ -1076,8 +1703,30 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         return 0;
     }
     if (p->prompt == HELP) {
-        p->prompt = COMMAND;
-        p->quit = c == 'q';
+        if (c == 'q') {
+            p->prompt = COMMAND;
+            p->quit = true;
+            return 0;
+        }
+        if (c == 'g' || c == 'h' || key.type == TAM_KEY_ESC || ctrl_c) {
+            p->prompt = COMMAND;
+            p->current.valid = false;
+            return 0;
+        }
+        if (key.type == TAM_KEY_DOWN || c == 'j' || key.type == TAM_KEY_ENTER) {
+            p->help_offset++;
+            p->current.valid = false;
+        } else if (key.type == TAM_KEY_UP || c == 'k') {
+            if (p->help_offset > 0)
+                p->help_offset--;
+            p->current.valid = false;
+        } else if (key.type == TAM_KEY_PAGE_DOWN || c == ' ') {
+            p->help_offset += p->height;
+            p->current.valid = false;
+        } else if (key.type == TAM_KEY_PAGE_UP || c == 'b') {
+            p->help_offset = p->help_offset > p->height ? p->help_offset - p->height : 0;
+            p->current.valid = false;
+        }
         return 0;
     }
     if (p->prompt == MARK_SET || p->prompt == MARK_GOTO)
@@ -1130,9 +1779,29 @@ static int handle_key(struct pager *p, tam_key_event_t key)
     uint64_t count = p->count;
     p->count = 0;
     int movement = 0;
-    if (key.type == TAM_KEY_DOWN || key.type == TAM_KEY_ENTER || c == 'j') {
+    bool attn_mode = has_attention_line(p);
+
+    if (key.type == TAM_KEY_TAB) {
+        return cycle_link(p, (key.mods & TAM_MOD_SHIFT) ? -1 : 1);
+    } else if (c == 'o') {
+        return follow_focused_link(p);
+    } else if (key.type == TAM_KEY_BACKSPACE) {
+        return go_back(p);
+    } else if (key.type == TAM_KEY_RIGHT && !(key.mods & TAM_MOD_SHIFT) &&
+               attn_mode && p->focused_link >= 0) {
+        return follow_focused_link(p);
+    } else if (key.type == TAM_KEY_LEFT && !(key.mods & TAM_MOD_SHIFT) &&
+               p->h_offset == 0 && (p->history_count > 0 || attn_mode)) {
+        return go_back(p);
+    } else if (key.type == TAM_KEY_ENTER && attn_mode && p->focused_link >= 0) {
+        return follow_focused_link(p);
+    } else if (key.type == TAM_KEY_DOWN || key.type == TAM_KEY_ENTER || c == 'j') {
+        if (attn_mode)
+            return move_attn_down(p);
         movement = 1;
     } else if (key.type == TAM_KEY_UP || c == 'k') {
+        if (attn_mode)
+            return move_attn_up(p);
         movement = -1;
     } else if (key.type == TAM_KEY_PAGE_DOWN || c == ' ') {
         movement = p->height;
@@ -1166,11 +1835,15 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             ensure_rendered(p, cur);
         }
         p->source = active_source(cur);
+        invalidate_row_index(cur);
         p->top = (struct position){0};
+        p->attn = (struct position){0};
         p->cursor = (struct position){0};
         p->h_offset = 0;
         p->search.hit = -1;
+        p->focused_link = -1;
         p->current.valid = false;
+        catch_link_on_attn(p, 1);
         p->message = cur->render_mode ? "Render mode" : "Raw mode";
         return 0;
     } else if (c == 'C') {
@@ -1178,7 +1851,12 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->current.valid = false;
         p->message = p->opts.color ? "Color on" : "Color off";
         return 0;
-    } else if (c == 'g' || key.type == TAM_KEY_HOME) {
+    } else if (c == 'g' && count == 0) {
+        p->prompt = HELP;
+        p->help_offset = 0;
+        p->current.valid = false;
+        return 0;
+    } else if ((c == 'g' && count > 0) || key.type == TAM_KEY_HOME || c == '<') {
         save_jump_mark(p);
         p->search.hit = -1;
         p->cursor = (struct position){0};
@@ -1187,6 +1865,9 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             p->job = GO_LINE;
         } else {
             p->top = p->cursor;
+            p->attn = p->cursor;
+            catch_link_on_attn(p, 1);
+            p->current.valid = false;
         }
     } else if (c == 'G' || key.type == TAM_KEY_END) {
         save_jump_mark(p);
@@ -1210,11 +1891,20 @@ static int handle_key(struct pager *p, tam_key_event_t key)
                                  : -p->search.original_direction, true);
     } else if (c == 'h') {
         p->prompt = HELP;
+        p->help_offset = 0;
+        p->current.valid = false;
     }
 
     if (movement) {
-        if (movement < 0 && back(p, p->top, -movement, &p->top) < 0)
-            return -1;
+        if (movement < 0) {
+            if (back(p, p->top, -movement, &p->top) < 0)
+                return -1;
+            if (attn_mode) {
+                p->attn = p->top;
+                catch_link_on_attn(p, -1);
+                p->current.valid = false;
+            }
+        }
         if (movement > 0) {
             p->cursor = p->top;
             p->remaining = (unsigned)movement;
@@ -1239,14 +1929,22 @@ static int refresh_size(struct pager *p)
     if (size_view(p) < 0)
         return -1;
     struct file_entry *cur = &p->files[p->file_index];
+    invalidate_row_index(cur);
     if (cur->render_mode) {
         ensure_rendered(p, cur);
         p->source = active_source(cur);
         off_t sz = source_size(p->source);
         if (sz >= 0 && p->top.byte >= sz)
             p->top = (struct position){0};
+        if (sz >= 0 && p->attn.byte >= sz)
+            p->attn = p->top;
     }
-    return align(p, p->top, &p->top);
+    if (align(p, p->top, &p->top) < 0)
+        return -1;
+    if (align(p, p->attn, &p->attn) < 0)
+        return -1;
+    catch_link_on_attn(p, 1);
+    return 0;
 }
 
 static int suspend_view(struct pager *p)
@@ -1442,7 +2140,10 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
         .source = &files[0].source,
         .files = files,
         .file_count = count,
+        .file_cap = count,
+        .cli_file_count = count,
         .file_index = 0,
+        .focused_link = -1,
         .opts = opts,
         .label = files[0].path,
         .dirty = true
@@ -1474,8 +2175,9 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
 
     if (size_view(&p) == 0 && signal_pipe(wake) == 0 &&
         tam_tty_raw(&p.tty, true) == 0) {
-        ensure_rendered(&p, &files[0]);
-        p.source = active_source(&files[0]);
+        ensure_rendered(&p, &p.files[0]);
+        p.source = active_source(&p.files[0]);
+        catch_link_on_attn(&p, 1);
         result = run(&p, wake[0]);
         if (result < 0 && p.current.valid) {
             int error = errno;
@@ -1499,17 +2201,22 @@ cleanup:;
         regfree(&p.search.regex);
     free(p.search.line);
     free(p.next.text);
-    for (size_t i = 0; i < count; i++) {
-        if (files[i].has_rendered) {
-            source_close(&files[i].rendered);
-            view_styles_free(&files[i].rendered_styles);
+    free(p.history);
+    for (size_t i = 0; i < p.file_count; i++) {
+        if (p.files[i].has_rendered) {
+            source_close(&p.files[i].rendered);
+            view_styles_free(&p.files[i].rendered_styles);
+            view_links_free(&p.files[i].rendered_links);
         }
-        if (files[i].opened)
-            source_close(&files[i].source);
-        if (files[i].own_fd && files[i].fd >= 0)
-            close(files[i].fd);
+        free(p.files[i].row_index);
+        if (p.files[i].opened)
+            source_close(&p.files[i].source);
+        if (p.files[i].own_fd && p.files[i].fd >= 0)
+            close(p.files[i].fd);
+        if (p.files[i].own_path)
+            free((void *)p.files[i].path);
     }
-    free(files);
+    free(p.files);
     errno = error;
     return result;
 }

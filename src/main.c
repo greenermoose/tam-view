@@ -10,9 +10,9 @@
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--ascii] [--color[=WHEN]|--no-color] [--] [FILE|- ...]\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--ascii] [--color[=WHEN]|--no-color] [--hyperlinks[=WHEN]|--no-hyperlinks] [--] [FILE|- ...]\n"
           "View files or piped input. Markup renders by default; the final page stays visible.\n"
-          "Press h for keys, or q to quit.\n", out);
+          "Press g for keybindings guide, or q to quit.\n", out);
 }
 
 static int copy(int fd)
@@ -107,6 +107,14 @@ int main(int argc, char **argv)
         } else if (options && (!strcmp(arg, "--no-color") ||
                                !strcmp(arg, "--color=never"))) {
             opts.color_mode = VIEW_COLOR_NEVER;
+        } else if (options && (!strcmp(arg, "--hyperlinks") ||
+                               !strcmp(arg, "--hyperlinks=always"))) {
+            opts.hyperlinks_mode = VIEW_HYPERLINKS_ALWAYS;
+        } else if (options && !strcmp(arg, "--hyperlinks=auto")) {
+            opts.hyperlinks_mode = VIEW_HYPERLINKS_AUTO;
+        } else if (options && (!strcmp(arg, "--no-hyperlinks") ||
+                               !strcmp(arg, "--hyperlinks=never"))) {
+            opts.hyperlinks_mode = VIEW_HYPERLINKS_NEVER;
         } else if (options && !strcmp(arg, "--help")) {
             free(inputs);
             usage(stdout);
@@ -138,6 +146,7 @@ int main(int argc, char **argv)
 
     if (!isatty(STDOUT_FILENO)) {
         opts.color = (opts.color_mode == VIEW_COLOR_ALWAYS);
+        opts.hyperlinks = (opts.hyperlinks_mode == VIEW_HYPERLINKS_ALWAYS);
         int status = 0;
         for (size_t i = 0; i < file_count; i++) {
             const char *label = inputs[i].path;
@@ -162,17 +171,22 @@ int main(int argc, char **argv)
                 }
                 struct source rendered;
                 struct view_styles styles = {0};
+                struct view_links links = {0};
                 int rc = view_render_source(&s, label, 80, opts.ascii,
                                             true, &rendered,
-                                            opts.color ? &styles : NULL);
+                                            opts.color ? &styles : NULL,
+                                            opts.hyperlinks ? &links : NULL,
+                                            NULL);
                 if (rc == 0) {
                     rc = view_dump_styled(&rendered, 80,
                                           opts.color ? &styles : NULL,
-                                          opts.linux_vt);
+                                          opts.hyperlinks ? &links : NULL,
+                                          opts.linux_vt, opts.hyperlinks);
                     source_close(&rendered);
                 }
                 int err = errno;
                 view_styles_free(&styles);
+                view_links_free(&links);
                 source_close(&s);
                 if (fd != STDIN_FILENO)
                     close(fd);
@@ -215,10 +229,14 @@ int main(int argc, char **argv)
         opts.color = opts.color_mode == VIEW_COLOR_ALWAYS ? true
                    : opts.color_mode == VIEW_COLOR_NEVER  ? false
                                                           : (!env_no_color && !is_dumb);
+        opts.hyperlinks = opts.hyperlinks_mode == VIEW_HYPERLINKS_ALWAYS ? true
+                        : opts.hyperlinks_mode == VIEW_HYPERLINKS_NEVER  ? false
+                                                                         : (opts.color && !opts.linux_vt && !is_dumb);
         result = view_interactive(inputs, file_count, tty, opts);
         close(tty);
     } else {
         opts.color = (opts.color_mode == VIEW_COLOR_ALWAYS);
+        opts.hyperlinks = (opts.hyperlinks_mode == VIEW_HYPERLINKS_ALWAYS);
         for (size_t i = 0; i < file_count; i++) {
             int fd = i == 0 ? input : open_input(inputs[i].path, &first_label);
             if (fd < 0) {
@@ -239,15 +257,19 @@ int main(int argc, char **argv)
             if (opts.mode != VIEW_MODE_RAW) {
                 struct source rendered;
                 struct view_styles styles = {0};
+                struct view_links links = {0};
                 const char *lbl = i == 0 ? first_label : inputs[i].path;
                 int rc = view_render_source(&s, lbl, 80, opts.ascii,
                                             opts.mode == VIEW_MODE_RENDER,
                                             &rendered,
-                                            opts.color ? &styles : NULL);
+                                            opts.color ? &styles : NULL,
+                                            opts.hyperlinks ? &links : NULL,
+                                            NULL);
                 if (rc == 0) {
                     result = view_dump_styled(&rendered, 80,
                                               opts.color ? &styles : NULL,
-                                              opts.linux_vt);
+                                              opts.hyperlinks ? &links : NULL,
+                                              opts.linux_vt, opts.hyperlinks);
                     source_close(&rendered);
                 } else if (errno == EINVAL) {
                     result = view_dump(&s, 80);
@@ -255,6 +277,7 @@ int main(int argc, char **argv)
                     result = -1;
                 }
                 view_styles_free(&styles);
+                view_links_free(&links);
             } else {
                 result = view_dump(&s, 80);
             }

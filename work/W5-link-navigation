@@ -1,0 +1,36 @@
+W5 — Link navigation, attention line, footer, and g guide (0.4.0)
+
+Date: 2026-11-22
+Version: 0.4.0 (with libtam 0.9.0)
+
+SUMMARY
+
+- Added shared core module `tam_pager` (`include/tam_pager.h`,
+  `src/tam_pager.c`) to `libtam` 0.9.0 for attention-line/link SGR,
+  safe OSC 8 open/close, standard Tamlinux footer formatting, URI
+  classification, percent-decoding, local path resolution, heading
+  slugification, and shell-free `xdg-open` dispatch.
+- Extended `tam-view` Markdown and HTML renderers to record sidecar
+  link spans (including wrapped multi-word links, table links,
+  autolinks, and entity-decoded HTML `href`) and anchor targets
+  (Markdown heading slugs with deduplication, HTML `id` and `<a name>`).
+- Added mode-aware attention line to `tam-view` pager: active on
+  rendered Markdown and HTML (`Down`/`Up` steps links and rows with
+  auto-highlighting; `Right`/`Enter`/`o` follows `#anchor`, local files,
+  or `xdg-open`; `Left`/`Backspace` returns via history stack;
+  `Tab`/`Shift-Tab` jumps between links), while plain text / raw mode
+  and standalone Mermaid keep direct `Down`/`Up` viewport scrolling.
+- Updated footer to `<file path> | L<n> <top>-<bot>/<total> v0.4.0`
+  (or `<top>-<bot>/<total>` in non-attention mode, `?` for streaming or
+  >4 MiB files).
+- Added `g` keybindings-guide toggle (scrollable on short terminals;
+  `Home`/`<`/`1g` go to line 1; `Ng` goes to line N).
+- Added `--hyperlinks[=auto|always|never]` / `--no-hyperlinks` for
+  optional OSC 8 hyperlinks, omitted on `TERM=linux`, `TERM=dumb`,
+  `--no-color`, `NO_COLOR`, and redirected stdout by default.
+
+VERIFICATION
+
+- `libtam`: `make core && make test` (ASan + UBSan) — all suites passed.
+- `tam-view`: `make test && make sanitize` (ASan + UBSan) — `layout: ok`,
+  `render: ok`, `PTY: ok`, `CLI: ok`.

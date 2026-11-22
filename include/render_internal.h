@@ -13,6 +13,7 @@ struct rbuf {
     size_t len;
     size_t cap;
     struct view_styles styles;
+    struct view_links links;
     bool oom;
 };
 
@@ -68,6 +69,15 @@ void rbuf_fill_style(struct rbuf *b, size_t start, size_t end,
                      unsigned char style);
 void rbuf_copy_spans(struct rbuf *dst, size_t dst_off, const struct rbuf *src,
                      size_t src_off, size_t len);
+void rbuf_add_link(struct rbuf *b, size_t start, size_t end,
+                   const char *url, size_t url_len);
+void rbuf_add_anchor(struct rbuf *b, const char *id, size_t id_len,
+                     size_t byte);
+void rbuf_add_heading_anchor(struct rbuf *b, const char *text, size_t len,
+                             size_t byte);
+void rbuf_copy_links(struct rbuf *dst, size_t dst_off, const struct rbuf *src,
+                     size_t src_off, size_t len,
+                     ssize_t *last_src_link, size_t *last_dst_link);
 void rbuf_wrap(struct rbuf *b, const char *text, int width,
                const char *first_prefix, const char *cont_prefix);
 void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,

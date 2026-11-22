@@ -1,6 +1,7 @@
 #include "render_internal.h"
 #include "view.h"
 
+#include <tam_pager.h>
 #include <tam_uni.h>
 
 #include <ctype.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 
 static const struct box_chars BOX_UNICODE = {
@@ -75,12 +77,14 @@ void rbuf_clear(struct rbuf *b)
     if (b->data)
         b->data[0] = '\0';
     b->styles.count = 0;
+    view_links_free(&b->links);
 }
 
 void rbuf_free(struct rbuf *b)
 {
     free(b->data);
     view_styles_free(&b->styles);
+    view_links_free(&b->links);
     *b = (struct rbuf){0};
 }
 
@@ -304,6 +308,140 @@ void rbuf_copy_spans(struct rbuf *dst, size_t dst_off, const struct rbuf *src,
     }
 }
 
+void rbuf_add_link(struct rbuf *b, size_t start, size_t end,
+                   const char *url, size_t url_len)
+{
+    if (b->oom || !url || url_len == 0 || end <= start)
+        return;
+    ssize_t idx = view_links_add_item(&b->links, url, url_len, (off_t)start);
+    if (idx < 0 || !view_links_push_span(&b->links, (off_t)start, (off_t)end,
+                                         (size_t)idx)) {
+        b->oom = true;
+    }
+}
+
+static bool anchor_exists(const struct view_links *lk, const char *id)
+{
+    for (size_t i = 0; i < lk->anchor_count; i++) {
+        if (strcasecmp(lk->anchors[i].id, id) == 0)
+            return true;
+    }
+    return false;
+}
+
+void rbuf_add_anchor(struct rbuf *b, const char *id, size_t id_len,
+                     size_t byte)
+{
+    if (b->oom || !id || id_len == 0)
+        return;
+    char tmp[256];
+    if (id_len >= sizeof(tmp))
+        id_len = sizeof(tmp) - 1;
+    memcpy(tmp, id, id_len);
+    tmp[id_len] = '\0';
+    if (anchor_exists(&b->links, tmp))
+        return;
+    if (!view_links_add_anchor(&b->links, tmp, id_len, (off_t)byte))
+        b->oom = true;
+}
+
+void rbuf_add_heading_anchor(struct rbuf *b, const char *text, size_t len,
+                             size_t byte)
+{
+    if (b->oom || !text || len == 0)
+        return;
+    char base[240];
+    size_t blen = tam_uri_slugify(text, len, base, sizeof(base));
+    if (blen == 0)
+        return;
+    if (!anchor_exists(&b->links, base)) {
+        if (!view_links_add_anchor(&b->links, base, blen, (off_t)byte))
+            b->oom = true;
+        return;
+    }
+    for (unsigned n = 1; n < 1000; n++) {
+        char cand[256];
+        int clen = snprintf(cand, sizeof(cand), "%s-%u", base, n);
+        if (clen <= 0 || (size_t)clen >= sizeof(cand))
+            break;
+        if (!anchor_exists(&b->links, cand)) {
+            if (!view_links_add_anchor(&b->links, cand, (size_t)clen, (off_t)byte))
+                b->oom = true;
+            return;
+        }
+    }
+}
+
+static ssize_t rbuf_link_at(const struct rbuf *src, size_t off)
+{
+    if (!src || src->links.span_count == 0)
+        return -1;
+    size_t lo = 0, hi = src->links.span_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (src->links.spans[mid].end <= (off_t)off)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < src->links.span_count &&
+        src->links.spans[lo].start <= (off_t)off &&
+        (off_t)off < src->links.spans[lo].end)
+        return (ssize_t)src->links.spans[lo].link_index;
+    return -1;
+}
+
+void rbuf_copy_links(struct rbuf *dst, size_t dst_off, const struct rbuf *src,
+                     size_t src_off, size_t len,
+                     ssize_t *last_src_link, size_t *last_dst_link)
+{
+    if (!src || dst->oom || len == 0 || src->links.span_count == 0)
+        return;
+    off_t s = (off_t)src_off;
+    off_t e = (off_t)(src_off + len);
+    size_t lo = 0, hi = src->links.span_count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (src->links.spans[mid].end <= s)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    ssize_t local_src = -1;
+    size_t local_dst = 0;
+    ssize_t *lsrc = last_src_link ? last_src_link : &local_src;
+    size_t *ldst = last_dst_link ? last_dst_link : &local_dst;
+
+    for (size_t i = lo; i < src->links.span_count && src->links.spans[i].start < e; i++) {
+        off_t cs = src->links.spans[i].start > s ? src->links.spans[i].start : s;
+        off_t ce = src->links.spans[i].end < e ? src->links.spans[i].end : e;
+        size_t sl_idx = src->links.spans[i].link_index;
+        if (sl_idx >= src->links.count)
+            continue;
+        size_t ds = dst_off + (size_t)(cs - s);
+        size_t de = dst_off + (size_t)(ce - s);
+        size_t dl_idx;
+        if (*lsrc == (ssize_t)sl_idx) {
+            dl_idx = *ldst;
+        } else {
+            const char *url = src->links.items[sl_idx].url;
+            ssize_t added = view_links_add_item(&dst->links, url, strlen(url),
+                                                (off_t)ds);
+            if (added < 0) {
+                dst->oom = true;
+                return;
+            }
+            dl_idx = (size_t)added;
+            *lsrc = (ssize_t)sl_idx;
+            *ldst = dl_idx;
+        }
+        if (!view_links_push_span(&dst->links, (off_t)ds, (off_t)de, dl_idx)) {
+            dst->oom = true;
+            return;
+        }
+    }
+}
+
 void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,
                       const char *first_prefix, const char *cont_prefix,
                       unsigned char pfx_style)
@@ -324,6 +462,8 @@ void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,
 
     bool first_line = true;
     int line_w = fp_w;
+    ssize_t last_src_link = -1;
+    size_t last_dst_link = 0;
     size_t pfx_start = b->len;
     rbuf_puts(b, fp);
     if (pfx_style != VIEW_STYLE_NONE && b->len > pfx_start)
@@ -355,6 +495,12 @@ void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,
                 unsigned char sp_st = rbuf_style_at(src, ws_off - 1);
                 if (sp_st != VIEW_STYLE_NONE)
                     rbuf_push_span(b, sp_dst, b->len, sp_st);
+                ssize_t sp_lk = rbuf_link_at(src, ws_off - 1);
+                if (sp_lk >= 0 && sp_lk == last_src_link) {
+                    if (!view_links_push_span(&b->links, (off_t)sp_dst,
+                                              (off_t)b->len, last_dst_link))
+                        b->oom = true;
+                }
             }
             line_w++;
         }
@@ -362,6 +508,8 @@ void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,
         size_t word_dst = b->len;
         rbuf_putn(b, ws, wlen);
         rbuf_copy_spans(b, word_dst, src, ws_off, wlen);
+        rbuf_copy_links(b, word_dst, src, ws_off, wlen,
+                        &last_src_link, &last_dst_link);
         line_w += ww;
 
         while (*p && isspace((unsigned char)*p))
@@ -466,8 +614,10 @@ void render_table(struct rbuf *b, const struct rtable *t, int width, bool ascii)
             size_t cell_dst = b->len;
             if (cw <= col_w[c]) {
                 rbuf_putn(b, cell, clen);
-                if (cb)
+                if (cb) {
                     rbuf_copy_spans(b, cell_dst, cb, 0, clen);
+                    rbuf_copy_links(b, cell_dst, cb, 0, clen, NULL, NULL);
+                }
                 if (is_hdr && b->len > cell_dst)
                     rbuf_fill_style(b, cell_dst, b->len, VIEW_STYLE_TABLE_HDR);
                 rbuf_repeat(b, " ", col_w[c] - cw);
@@ -483,8 +633,10 @@ void render_table(struct rbuf *b, const struct rtable *t, int width, bool ascii)
                                        fit, clen + 1);
                 size_t flen = strlen(fit);
                 rbuf_putn(b, fit, flen);
-                if (cb)
+                if (cb) {
                     rbuf_copy_spans(b, cell_dst, cb, 0, flen);
+                    rbuf_copy_links(b, cell_dst, cb, 0, flen, NULL, NULL);
+                }
                 free(fit);
                 if (col_w[c] > 1) {
                     rbuf_puts(b, ascii ? "~" : "\xe2\x80\xa6");
@@ -647,10 +799,16 @@ static int read_all_source(struct source *s, char **out_buf, size_t *out_len)
 
 int view_render_source(struct source *raw, const char *path, int width,
                        bool ascii, bool force_render, struct source *out,
-                       struct view_styles *styles_out)
+                       struct view_styles *styles_out,
+                       struct view_links *links_out,
+                       enum view_format *fmt_out)
 {
     if (styles_out)
         *styles_out = (struct view_styles){0};
+    if (links_out)
+        *links_out = (struct view_links){0};
+    if (fmt_out)
+        *fmt_out = VIEW_FORMAT_RAW;
     enum view_format fmt = view_detect_format(path, raw, force_render);
     if (fmt == VIEW_FORMAT_RAW) {
         errno = EINVAL;
@@ -691,10 +849,13 @@ int view_render_source(struct source *raw, const char *path, int width,
         return -1;
     }
     struct view_styles captured = b.styles;
+    struct view_links captured_links = b.links;
     b.styles = (struct view_styles){0};
+    b.links = (struct view_links){0};
     rbuf_free(&b);
     if (fflush(fp) != 0) {
         view_styles_free(&captured);
+        view_links_free(&captured_links);
         fclose(fp);
         return -1;
     }
@@ -710,6 +871,7 @@ int view_render_source(struct source *raw, const char *path, int width,
     off_t end = lseek(out->fd, 0, SEEK_END);
     if (end < 0) {
         view_styles_free(&captured);
+        view_links_free(&captured_links);
         source_close(out);
         return -1;
     }
@@ -718,5 +880,11 @@ int view_render_source(struct source *raw, const char *path, int width,
         *styles_out = captured;
     else
         view_styles_free(&captured);
+    if (links_out)
+        *links_out = captured_links;
+    else
+        view_links_free(&captured_links);
+    if (fmt_out)
+        *fmt_out = fmt;
     return 0;
 }

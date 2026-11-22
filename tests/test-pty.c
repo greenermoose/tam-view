@@ -39,6 +39,11 @@ struct screen {
     int sgr_nparams;
     bool sgr_on;
     int sgr_count;
+    char osc_buf[256];
+    size_t osc_len;
+    bool osc8_on;
+    int osc8_open_count;
+    int osc8_close_count;
 };
 
 struct terminal {
@@ -51,10 +56,34 @@ struct terminal {
 static void byte(struct screen *s, unsigned char c)
 {
     if (s->escape == 1) {
+        if (c == ']') {
+            s->escape = 3;
+            s->osc_len = 0;
+            return;
+        }
         CHECK(c == '[');
         s->escape = 2;
         s->number = 0;
         s->sgr_nparams = 0;
+    } else if (s->escape == 3) {
+        if (c == 27) {
+            s->escape = 4;
+            return;
+        }
+        if (s->osc_len + 1 < sizeof(s->osc_buf))
+            s->osc_buf[s->osc_len++] = (char)c;
+    } else if (s->escape == 4) {
+        CHECK(c == '\\');
+        s->osc_buf[s->osc_len] = '\0';
+        CHECK(strncmp(s->osc_buf, "8;;", 3) == 0);
+        if (s->osc_buf[3] != '\0') {
+            s->osc8_on = true;
+            s->osc8_open_count++;
+        } else {
+            s->osc8_on = false;
+            s->osc8_close_count++;
+        }
+        s->escape = 0;
     } else if (s->escape == 2) {
         if (c >= '0' && c <= '9') {
             s->number = 10 * s->number + (c - '0');
@@ -180,8 +209,9 @@ static void size(struct terminal *t, int rows, int cols)
     CHECK(ioctl(t->slave, TIOCSWINSZ, &ws) == 0);
 }
 
-static struct terminal start_args(const char *viewer, const char *path1,
-                                  const char *path2, int input, int producer)
+static struct terminal start_env(const char *viewer, const char *path1,
+                                 const char *path2, int input, int producer,
+                                 const char *term_val)
 {
     struct terminal t = {0};
     t.master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -206,7 +236,7 @@ static struct terminal start_args(const char *viewer, const char *path1,
             close(producer);
         if (input >= 0)
             close(input);
-        CHECK(setenv("TERM", "linux", 1) == 0);
+        CHECK(setenv("TERM", term_val ? term_val : "linux", 1) == 0);
         if (path2)
             execl(viewer, viewer, path1, path2, (char *)NULL);
         else
@@ -215,6 +245,12 @@ static struct terminal start_args(const char *viewer, const char *path1,
     }
     active = t.child;
     return t;
+}
+
+static struct terminal start_args(const char *viewer, const char *path1,
+                                  const char *path2, int input, int producer)
+{
+    return start_env(viewer, path1, path2, input, producer, "linux");
 }
 
 static struct terminal start(const char *viewer, const char *path,
@@ -255,6 +291,7 @@ static void finish(struct terminal *t, int code, int row)
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == code);
     restored(t);
     CHECK(!t->screen.sgr_on);
+    CHECK(!t->screen.osc8_on);
     CHECK(write(t->slave, "shell> ", 7) == 7);
     expect(t, row, "shell> ");
 }
@@ -318,8 +355,12 @@ int main(int argc, char **argv)
     expect(&t, 3, "Invalid pattern");
     send_key(&t, "/missing\r");
     expect(&t, 3, "Pattern not found");
+    send_key(&t, "g");
+    expect(&t, 0, "tam-view keybindings guide");
+    send_key(&t, "g");
+    expect(&t, 0, "10 needle.[x]");
     send_key(&t, "h");
-    expect(&t, 0, "tam-view keys");
+    expect(&t, 0, "tam-view keybindings guide");
     send_key(&t, "q");
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "10 needle.[x]") && contains(&t, 2, "12 twelve"));
@@ -418,7 +459,9 @@ int main(int argc, char **argv)
     restored(&t);
     CHECK(kill(t.child, SIGCONT) == 0);
     size(&t, 5, 40);
-    expect(&t, 4, path);
+    expect(&t, 4, "/tmp/tam-view-test-");
+    CHECK(strstr(t.screen.cell[4], "1-4/8") != NULL);
+    CHECK(strstr(t.screen.cell[4], "v0.4.0") != NULL);
     CHECK(contains(&t, 0, "one") && contains(&t, 3, "four"));
     CHECK(kill(t.child, SIGTERM) == 0);
     finish(&t, 128 + SIGTERM, 4);
@@ -460,7 +503,7 @@ int main(int argc, char **argv)
     expect(&t, 3, "(file 2 of 2)");
     send_key(&t, ":p");
     expect(&t, 3, "End of file");
-    send_key(&t, "g");
+    send_key(&t, "1g");
     expect(&t, 0, "file1-a");
     send_key(&t, "2:x");
     expect(&t, 0, "file2-a");
@@ -536,10 +579,121 @@ int main(int argc, char **argv)
     t = start_args(argv[1], "-R", path, -1, -1);
     expect(&t, 0, "Heading");
     CHECK(t.screen.sgr_count == 0);
+    CHECK(t.screen.osc8_open_count == 0);
     send_key(&t, "q");
     finish(&t, 0, 3);
     close_terminal(&t);
     CHECK(unsetenv("NO_COLOR") == 0);
+
+    // 0.4.0: Attention line on Markdown/HTML, footer L<n> <top>-<bot>/<total> v0.4.0,
+    // Right/Left link following & history, mock xdg-open, and OSC 8 on xterm-256color.
+    {
+        char dir[] = "/tmp/tam-view-links-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL);
+        char md_path[256], html_path[256], mock_bin[256], mock_log[256];
+        snprintf(md_path, sizeof(md_path), "%s/index.md", dir);
+        snprintf(html_path, sizeof(html_path), "%s/other.html", dir);
+        snprintf(mock_bin, sizeof(mock_bin), "%s/xdg-open", dir);
+        snprintf(mock_log, sizeof(mock_log), "%s/opened.txt", dir);
+
+        int mfd = open(md_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(mfd >= 0);
+        const char *md_doc =
+            "# Top\n\n"
+            "Go [Local](other.html#sec) or [Ext](https://tamlinux.org)\n\n"
+            "Jump [Target](#target)\n\n"
+            "## Target\n\n"
+            "Reached target.\n";
+        CHECK(write(mfd, md_doc, strlen(md_doc)) == (ssize_t)strlen(md_doc));
+        CHECK(close(mfd) == 0);
+
+        int hfd = open(html_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        CHECK(hfd >= 0);
+        const char *html_doc =
+            "<html><body><h1>Other Page</h1><p>First</p>"
+            "<h2 id=\"sec\">Section Two</h2><p>Body</p></body></html>";
+        CHECK(write(hfd, html_doc, strlen(html_doc)) == (ssize_t)strlen(html_doc));
+        CHECK(close(hfd) == 0);
+
+        int bfd = open(mock_bin, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+        CHECK(bfd >= 0);
+        char script[512];
+        snprintf(script, sizeof(script), "#!/bin/sh\nprintf '%%s\\n' \"$1\" > '%s'\n", mock_log);
+        CHECK(write(bfd, script, strlen(script)) == (ssize_t)strlen(script));
+        CHECK(close(bfd) == 0);
+
+        const char *old_path = getenv("PATH");
+        char new_path[4096];
+        snprintf(new_path, sizeof(new_path), "%s:%s", dir, old_path ? old_path : "/usr/bin");
+        CHECK(setenv("PATH", new_path, 1) == 0);
+
+        t = start_env(argv[1], "--ascii", md_path, -1, -1, "xterm-256color");
+        size(&t, 6, 60);
+        expect(&t, 0, "Top");
+        // Footer shows L1 and version v0.4.0.
+        for (int i = 0; i < 60; i++) {
+            if (strstr(t.screen.cell[5], "L1 ") && strstr(t.screen.cell[5], "v0.4.0"))
+                break;
+            drain(&t, 50);
+        }
+        CHECK(strstr(t.screen.cell[5], "L1 ") != NULL);
+        CHECK(strstr(t.screen.cell[5], "v0.4.0") != NULL);
+        CHECK(t.screen.osc8_open_count > 0);
+        CHECK(t.screen.osc8_open_count == t.screen.osc8_close_count);
+
+        // Move attention line down to row 3 ("Go Local (other.html#sec) or Ext (...)").
+        send_key(&t, "\033[B\033[B\033[B");
+        for (int i = 0; i < 60; i++) {
+            if (strstr(t.screen.cell[5], "L4 "))
+                break;
+            drain(&t, 50);
+        }
+        CHECK(strstr(t.screen.cell[5], "L4 ") != NULL);
+
+        // Right arrow follows first link on row ("other.html#sec") and lands on Section Two (L6).
+        send_key(&t, "\033[C");
+        expect(&t, 1, "Section Two");
+        CHECK(strstr(t.screen.cell[5], "L6 ") != NULL);
+
+        // Left arrow returns to index.md via history.
+        send_key(&t, "\033[D");
+        expect(&t, 0, "Top");
+
+        // Down steps to second link on row ("https://tamlinux.org"), Right invokes mock xdg-open.
+        send_key(&t, "\033[B");
+        send_key(&t, "\033[C");
+        expect(&t, 5, "Opened: https://tamlinux.org");
+
+        // Verify mock xdg-open received exact URL.
+        bool logged = false;
+        for (int i = 0; i < 40; i++) {
+            FILE *lf = fopen(mock_log, "r");
+            if (lf) {
+                char line[128] = {0};
+                if (fgets(line, sizeof(line), lf) &&
+                    strncmp(line, "https://tamlinux.org", 20) == 0) {
+                    logged = true;
+                }
+                fclose(lf);
+                if (logged)
+                    break;
+            }
+            drain(&t, 25);
+        }
+        CHECK(logged);
+
+        send_key(&t, "q");
+        finish(&t, 0, 5);
+        close_terminal(&t);
+
+        if (old_path)
+            setenv("PATH", old_path, 1);
+        unlink(mock_log);
+        unlink(mock_bin);
+        unlink(html_path);
+        unlink(md_path);
+        rmdir(dir);
+    }
 
     CHECK(unlink(path) == 0);
     puts("PTY: ok");

@@ -32,14 +32,17 @@ BUILD AND TRY
 
 KEYS
 
-  Down, j, Enter       Next display row
-  Up, k                Previous display row
+  Down, j              Next line (or move attention line / next link in Markup)
+  Up, k                Previous line (or move attention line / prev link in Markup)
   Space, Page Down     Next page
   b, Page Up           Previous page
   d, u                 Half page down or up
-  Left, Right          Scroll horizontally
+  Right, Enter, o      Follow highlighted link (Right scrolls if no link)
+  Left, Backspace      Return in link history (Left scrolls if shifted)
+  Tab, Shift-Tab       Jump to next / previous link in document
+  Shift-Left, -Right   Scroll horizontally
   S                    Toggle chop long lines
-  g, Home              Start
+  Home, <, 1g          Start of file
   G, End               Show the last page
   Ng                   Go to file line N, for example 42g
   m<a-z>, '<a-z>, ''   Set mark, go to mark, or return to previous position
@@ -51,7 +54,7 @@ KEYS
   F                    Follow growing file or pipe (Ctrl-C stops)
   Esc, Ctrl-C          Cancel a search/follow, or clear search highlight
   Ctrl-Z               Suspend and restore the shell's tty settings
-  h                    Help
+  g, h                 Toggle the keybindings guide
   q                    Quit and keep the visible text
 
   Searches are case-sensitive. Enter submits a query and Backspace
@@ -59,6 +62,12 @@ KEYS
   unless -R/--render is passed (plain text unless --color is also set).
   Color respects --color[=auto|always|never], --no-color, NO_COLOR,
   TERM=dumb, and TERM=linux.
+  OSC 8 terminal hyperlinks respect --hyperlinks[=auto|always|never] and
+  --no-hyperlinks (omitted on TERM=linux, TERM=dumb, --no-color,
+  NO_COLOR, and redirected stdout by default).
+  Rendered Markdown and HTML show an attention line for link navigation
+  and a footer with <path> | L<line> <top>-<bot>/<total> vX.Y.Z; plain
+  text and raw views scroll directly with Up/Down.
   The viewer uses the primary screen on the Linux console and
   ANSI terminals such as tam-last. Scrollback, where available, is
   maintained by the terminal.

@@ -7,9 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char *render_str_styles(enum view_format fmt, const char *input,
-                               int width, bool ascii,
-                               struct view_styles *styles_out)
+static char *render_str_all(enum view_format fmt, const char *input,
+                            int width, bool ascii,
+                            struct view_styles *styles_out,
+                            struct view_links *links_out)
 {
     struct rbuf b;
     rbuf_init(&b);
@@ -24,12 +25,20 @@ static char *render_str_styles(enum view_format fmt, const char *input,
     // Rendered text must never contain raw ESC bytes.
     if (b.data)
         assert(memchr(b.data, '\033', b.len) == NULL);
-    // Verify spans are sorted and non-overlapping.
+    // Verify style spans are sorted and non-overlapping.
     for (size_t i = 0; i < b.styles.count; i++) {
         assert(b.styles.spans[i].start < b.styles.spans[i].end);
         assert((size_t)b.styles.spans[i].end <= b.len);
         if (i > 0)
             assert(b.styles.spans[i - 1].end <= b.styles.spans[i].start);
+    }
+    // Verify link spans are sorted, non-overlapping, and in bounds.
+    for (size_t i = 0; i < b.links.span_count; i++) {
+        assert(b.links.spans[i].start < b.links.spans[i].end);
+        assert((size_t)b.links.spans[i].end <= b.len);
+        assert(b.links.spans[i].link_index < b.links.count);
+        if (i > 0)
+            assert(b.links.spans[i - 1].end <= b.links.spans[i].start);
     }
     if (styles_out) {
         *styles_out = b.styles;
@@ -37,7 +46,20 @@ static char *render_str_styles(enum view_format fmt, const char *input,
     } else {
         view_styles_free(&b.styles);
     }
+    if (links_out) {
+        *links_out = b.links;
+        b.links = (struct view_links){0};
+    } else {
+        view_links_free(&b.links);
+    }
     return b.data ? b.data : strdup("");
+}
+
+static char *render_str_styles(enum view_format fmt, const char *input,
+                               int width, bool ascii,
+                               struct view_styles *styles_out)
+{
+    return render_str_all(fmt, input, width, ascii, styles_out, NULL);
 }
 
 static char *render_str(enum view_format fmt, const char *input, int width, bool ascii)
@@ -201,6 +223,46 @@ static void test_mermaid(void)
     free(bad);
 }
 
+static void test_links_and_anchors(void)
+{
+    const char *md =
+        "# Intro Section\n\n"
+        "See [Tamlinux home page](https://tamlinux.org \"Title\") and <https://example.org>.\n\n"
+        "## Intro Section\n\n"
+        "| Name | Link |\n"
+        "| --- | --- |\n"
+        "| Local | [page](page.html#top) |\n";
+
+    struct view_links lk = {0};
+    char *out = render_str_all(VIEW_FORMAT_MARKDOWN, md, 30, true, NULL, &lk);
+    assert(lk.count == 3);
+    assert(strcmp(lk.items[0].url, "https://tamlinux.org") == 0);
+    assert(strcmp(lk.items[1].url, "https://example.org") == 0);
+    assert(strcmp(lk.items[2].url, "page.html#top") == 0);
+    // Wrapped multi-word link still produces one logical link item.
+    assert(lk.span_count >= 3);
+    // Duplicate heading slugs get deduplicated.
+    assert(lk.anchor_count == 2);
+    assert(strcmp(lk.anchors[0].id, "intro-section") == 0);
+    assert(strcmp(lk.anchors[1].id, "intro-section-1") == 0);
+    view_links_free(&lk);
+    free(out);
+
+    const char *html =
+        "<html><body>"
+        "<h1 id=\"custom\">Top</h1>"
+        "<p><a name=\"mark\"></a>Go to <a href=\"https://ex.com/?a=1&amp;b=2\">Query</a>.</p>"
+        "<h2>Checklist</h2>"
+        "</body></html>";
+    out = render_str_all(VIEW_FORMAT_HTML, html, 60, true, NULL, &lk);
+    assert(lk.count == 1);
+    assert(strcmp(lk.items[0].url, "https://ex.com/?a=1&b=2") == 0);
+    assert(lk.anchor_count >= 3);
+    assert(strcmp(lk.anchors[0].id, "custom") == 0);
+    view_links_free(&lk);
+    free(out);
+}
+
 int main(void)
 {
     assert(setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, ""));
@@ -208,6 +270,7 @@ int main(void)
     test_markdown();
     test_html();
     test_mermaid();
+    test_links_and_anchors();
     puts("render: ok");
     return 0;
 }
