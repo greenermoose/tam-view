@@ -103,6 +103,55 @@ int main(void)
     ROWS_H("a中bc\n", 4, 2, false, " bc");
     ROWS_H("ab中c\n", 3, 0, true, "ab");
 
+    // Styled rows: document spans, search override, horizontal scroll, linux_vt, and ESC sanitization.
+    {
+        FILE *fp = tmpfile();
+        assert(fp);
+        const char *txt = "hello \033world\n";
+        assert(fwrite(txt, 1, strlen(txt), fp) == strlen(txt));
+        assert(fflush(fp) == 0);
+        rewind(fp);
+        struct source s;
+        assert(source_open(&s, fileno(fp)) == 0);
+
+        struct view_styles doc = {0};
+        assert(view_styles_push(&doc, 0, 5, VIEW_STYLE_BOLD));
+        assert(view_styles_push(&doc, 6, 12, VIEW_STYLE_ITALIC));
+        struct view_styles srch = {0};
+        assert(view_styles_push(&srch, 2, 4, VIEW_STYLE_SEARCH_CUR));
+
+        struct view_row_style rs = {
+            .doc_spans = doc.spans,
+            .doc_count = doc.count,
+            .search_spans = srch.spans,
+            .search_count = srch.count,
+            .linux_vt = false
+        };
+        char out[1024];
+        struct position next;
+        assert(view_row_styled(&s, (struct position){0}, 40, 0, false, &rs,
+                               out, &next) == VIEW_ROW);
+        // "he" bold, "ll" search_cur, "o" bold, " " none, "^[world" italic (ESC sanitized!).
+        assert(!strcmp(out, "\033[1mhe\033[0m\033[1;30;43mll\033[0m\033[1mo\033[0m \033[3m^[world\033[0m"));
+
+        // Linux VT maps italic to cyan (\033[36m) instead of \033[3m.
+        rs.linux_vt = true;
+        assert(view_row_styled(&s, (struct position){0}, 40, 0, false, &rs,
+                               out, &next) == VIEW_ROW);
+        assert(strstr(out, "\033[36m^[world\033[0m") != NULL);
+
+        // Horizontal scroll preserves styles on visible slice.
+        rs.linux_vt = false;
+        assert(view_row_styled(&s, (struct position){0}, 6, 2, false, &rs,
+                               out, &next) == VIEW_ROW);
+        assert(!strcmp(out, "\033[1;30;43mll\033[0m\033[1mo\033[0m \033[3m^[\033[0m"));
+
+        view_styles_free(&doc);
+        view_styles_free(&srch);
+        source_close(&s);
+        fclose(fp);
+    }
+
     puts("layout: ok");
     return 0;
 }

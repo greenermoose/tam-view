@@ -1,0 +1,20 @@
+SANDBOX
+
+This folder holds test files, demos, and small experiments for trying
+this repository's project out by hand. It is for playing with the
+program, separate from automated tests (tests/) and developer helpers
+(tools/).
+
+
+WHAT GOES HERE
+
+  Sample input files, interactive demo scripts, and throwaway configs
+  that let someone exercise the program and see how it behaves. Nothing
+  here is installed by make install, and make test does not rely on it.
+
+
+IN THIS REPOSITORY
+
+  Sample Markdown, HTML, Mermaid flowchart, and plain-text documents
+  (`demo.md`, `page.html`, `flow.mmd`, `flow-lr.mmd`, `plain.txt`) for
+  manually exercising tam-view's rendering, styling, and paging modes.

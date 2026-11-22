@@ -2,21 +2,24 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-21, with W3
+Updated: 2026-11-22, with W4
 
 STATE
 
-  0.2.0 on dev adds render mode by default for interactive markup viewing
-  (Markdown, HTML, and Mermaid flowcharts), with -r/--raw, -R/--render,
-  --ascii (auto on TERM=linux), and the R key toggle in the pager while
-  preserving 0.0.1/0.1.0 navigation, search, and primary-screen exit.
-  Polished HTML typographic entities, Mermaid TD cycle layering and
-  branching edge labels, and TERM=dumb/no-tty render fallback; dev build
+  0.3.0 on dev adds ANSI terminal styling for rendered Markdown, HTML,
+  and Mermaid documents plus live POSIX regex search highlighting in
+  both raw and rendered modes, using sidecar byte-offset style spans so
+  regex search, wrapping, horizontal scroll, and ESC sanitization remain
+  exact. Supports --color[=auto|always|never], --no-color, NO_COLOR,
+  TERM=dumb, TERM=linux, live C toggle, and Esc highlight clearing.
+  Added sandbox/README-sandbox for tam-idol 1.1.0 compliance; dev build
   installed to ~/.local/bin/tam-view.
 
 NEXT
 
   1. Install/package for Tamlinux when Fred calls for the next stage.
+  2. Optional future slices: R1 code review & man page (0.3.1) or
+     additional Mermaid diagram types (sequence/state/subgraphs).
 
 WAITING FOR FRED
 
@@ -25,5 +28,6 @@ WAITING FOR FRED
 WATCH OUT
 
   Redirected stdout stays a byte-for-byte copy unless -R/--render is
-  explicitly passed. Slow pipes in auto-detect mode must not block on
-  prefix sniffing before non-blocking poll setup in pager.c.
+  explicitly passed, and redirected -R stays plain text unless --color
+  is also explicitly passed. Every styled row must end with SGR reset
+  (\033[0m) so the status line and shell prompt stay clean on exit.

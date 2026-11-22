@@ -32,8 +32,13 @@ static void check(bool ok, const char *what, int line)
 
 struct screen {
     char cell[ROWS][COLS + 1];
+    bool styled[ROWS][COLS];
     int rows, cols, row, col;
     int escape, number;
+    int sgr_params[8];
+    int sgr_nparams;
+    bool sgr_on;
+    int sgr_count;
 };
 
 struct terminal {
@@ -49,11 +54,28 @@ static void byte(struct screen *s, unsigned char c)
         CHECK(c == '[');
         s->escape = 2;
         s->number = 0;
+        s->sgr_nparams = 0;
     } else if (s->escape == 2) {
         if (c >= '0' && c <= '9') {
             s->number = 10 * s->number + (c - '0');
             return;
         }
+        if (c == ';') {
+            CHECK(s->sgr_nparams < 8);
+            s->sgr_params[s->sgr_nparams++] = s->number;
+            s->number = 0;
+            return;
+        }
+        if (c == 'm') {
+            CHECK(s->sgr_nparams < 8);
+            s->sgr_params[s->sgr_nparams++] = s->number;
+            s->sgr_count++;
+            s->sgr_on = !(s->sgr_nparams == 1 && s->sgr_params[0] == 0);
+            s->escape = 0;
+            s->sgr_nparams = 0;
+            return;
+        }
+        CHECK(s->sgr_nparams == 0);
         int n = s->number ? s->number : 1;
         if (c == 'A') {
             s->row -= n;
@@ -64,10 +86,11 @@ static void byte(struct screen *s, unsigned char c)
             if (s->row >= s->rows)
                 s->row = s->rows - 1;
         } else {
-            // These are the only controls the viewer may write. In
+            // These are the only non-SGR controls the viewer may write. In
             // particular, clearing or switching the screen fails the test.
             CHECK(c == 'K' && !s->number);
             memset(s->cell[s->row] + s->col, ' ', (size_t)(s->cols - s->col));
+            memset(s->styled[s->row] + s->col, 0, (size_t)(s->cols - s->col));
         }
         if (s->col == s->cols)
             s->col--;
@@ -81,11 +104,15 @@ static void byte(struct screen *s, unsigned char c)
             s->row--;
             memmove(s->cell[0], s->cell[1], (size_t)(s->rows - 1) * sizeof(s->cell[0]));
             memset(s->cell[s->row], ' ', (size_t)s->cols);
+            memmove(s->styled[0], s->styled[1], (size_t)(s->rows - 1) * sizeof(s->styled[0]));
+            memset(s->styled[s->row], 0, (size_t)s->cols);
         }
     } else {
         CHECK(c >= ' ' && c <= '~');
         CHECK(s->col < s->cols);
-        s->cell[s->row][s->col++] = (char)c;
+        s->cell[s->row][s->col] = (char)c;
+        s->styled[s->row][s->col] = s->sgr_on;
+        s->col++;
     }
 }
 
@@ -120,6 +147,17 @@ static void expect(struct terminal *t, int row, const char *expected)
     fprintf(stderr, "wanted row %d starting with [%s]\n", row, expected);
     for (int i = 0; i < t->screen.rows; i++)
         fprintf(stderr, "%d [%s]\n", i, t->screen.cell[i]);
+    CHECK(false);
+}
+
+static void expect_styled(struct terminal *t, int row, int col, bool want)
+{
+    for (int i = 0; i < 60; i++) {
+        if (t->screen.styled[row][col] == want)
+            return;
+        drain(t, 50);
+    }
+    fprintf(stderr, "wanted styled[%d][%d] == %d\n", row, col, (int)want);
     CHECK(false);
 }
 
@@ -216,6 +254,7 @@ static void finish(struct terminal *t, int code, int row)
     int status = wait_child(t, 0);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == code);
     restored(t);
+    CHECK(!t->screen.sgr_on);
     CHECK(write(t->slave, "shell> ", 7) == 7);
     expect(t, row, "shell> ");
 }
@@ -435,20 +474,53 @@ int main(int argc, char **argv)
     CHECK(contains(&t, 2, "log-5"));
     close_terminal(&t);
 
-    // Render mode (-R) and R toggle to raw and back.
+    // Render mode (-R), styling, C toggle, search highlight + Esc clear, and --no-color.
     write_file(path, "# Heading\n\n- bullet\n\nline3\nline4\n");
     t = start_args(argv[1], "-R", path, -1, -1);
     expect(&t, 0, "Heading");
     expect(&t, 1, "=======");
+    CHECK(t.screen.styled[0][0]);
+    CHECK(t.screen.sgr_count > 0);
+    send_key(&t, "C");
+    expect(&t, 3, "Color off");
+    CHECK(!t.screen.styled[0][0]);
+    send_key(&t, "C");
+    expect(&t, 3, "Color on");
+    CHECK(t.screen.styled[0][0]);
     send_key(&t, "R");
     expect(&t, 0, "# Heading");
     expect(&t, 3, "Raw mode");
+    send_key(&t, "/Heading\r");
+    expect_styled(&t, 0, 2, true);
+    send_key(&t, "\033");
+    expect(&t, 3, "Highlight cleared");
+    CHECK(!t.screen.styled[0][2]);
     send_key(&t, "R");
     expect(&t, 0, "Heading");
     expect(&t, 3, "Render mode");
     send_key(&t, "q");
     finish(&t, 0, 3);
     close_terminal(&t);
+
+    // --no-color suppresses all SGR output in interactive mode.
+    t = start_args(argv[1], "--no-color", path, -1, -1);
+    expect(&t, 0, "# Heading");
+    send_key(&t, "/Heading\r");
+    expect(&t, 0, "# Heading");
+    CHECK(t.screen.sgr_count == 0);
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+
+    // NO_COLOR=1 suppresses all SGR output by default.
+    CHECK(setenv("NO_COLOR", "1", 1) == 0);
+    t = start_args(argv[1], "-R", path, -1, -1);
+    expect(&t, 0, "Heading");
+    CHECK(t.screen.sgr_count == 0);
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+    CHECK(unsetenv("NO_COLOR") == 0);
 
     CHECK(unlink(path) == 0);
     puts("PTY: ok");

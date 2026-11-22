@@ -1,0 +1,40 @@
+W4 ANSI STYLING AND SEARCH HIGHLIGHTING (0.3.0)
+
+Date: 2026-11-22
+AI harness: Antigravity CLI
+AI model: Gemini 4 Neon (Medium)
+
+GUIDANCE
+
+  Fred: "/plan Do the next slice of work for tam-view."
+  Selected slice: ANSI terminal styling & search highlighting (0.3.0)
+  with --no-color / NO_COLOR / TERM=dumb fallback. Approved plan to
+  use sidecar byte-offset style spans, C toggle, Esc highlight clear,
+  and tam-idol 1.1.0 sandbox/README-sandbox hygiene.
+
+DONE
+
+  - Added sidecar style-span types (enum view_style, struct view_span,
+    struct view_styles, struct view_row_style) and view_row_styled /
+    view_dump_styled in include/view.h and src/layout.c.
+  - Added style-aware rbuf helpers (rbuf_clear, rbuf_push_span,
+    rbuf_fill_style, rbuf_copy_spans, rbuf_wrap_styled) and styled table
+    cells in include/render_internal.h and src/render.c.
+  - Emitted semantic style spans in src/render_md.c, src/render_html.c,
+    and src/render_mermaid.c while keeping rendered text plain UTF-8.
+  - Wired document styling, per-line regex search highlighting (distinct
+    current-hit vs other matches), C color toggle, and Esc highlight
+    clearing in src/pager.c.
+  - Added --color[=auto|always|never], --no-color, NO_COLOR, TERM=dumb,
+    and TERM=linux SGR handling in src/main.c.
+  - Extended test-layout, test-render, test-pty (SGR-aware terminal
+    emulator + exit SGR reset assertion), and cli.sh.
+  - Bumped VERSION to 0.3.0, added plans/P3-styling-and-highlighting.md
+    and sandbox/README-sandbox, updated ROADMAP.md, README, P1/P2 status,
+    and work/WHATNOW.
+  - Verified make test, make sanitize, ldd (libc only), idol-check, and
+    installed dev build to ~/.local/bin/tam-view.
+
+HANDOFF
+
+  0.3.0 is complete on dev and installed to ~/.local/bin/tam-view.

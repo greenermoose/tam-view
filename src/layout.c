@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -16,6 +17,114 @@ struct glyph {
     size_t len;
     int width;
 };
+
+void view_styles_free(struct view_styles *st)
+{
+    if (!st)
+        return;
+    free(st->spans);
+    *st = (struct view_styles){0};
+}
+
+bool view_styles_push(struct view_styles *st, off_t start, off_t end,
+                      unsigned char style)
+{
+    if (!st || style == VIEW_STYLE_NONE || end <= start)
+        return true;
+    if (st->count > 0) {
+        struct view_span *prev = &st->spans[st->count - 1];
+        if (start < prev->end) {
+            start = prev->end;
+            if (end <= start)
+                return true;
+        }
+        if (prev->end == start && prev->style == style) {
+            prev->end = end;
+            return true;
+        }
+    }
+    if (st->count == st->cap) {
+        size_t ncap = st->cap ? st->cap * 2 : 64;
+        struct view_span *grown = realloc(st->spans, ncap * sizeof(*grown));
+        if (!grown)
+            return false;
+        st->spans = grown;
+        st->cap = ncap;
+    }
+    st->spans[st->count++] = (struct view_span){
+        .start = start,
+        .end = end,
+        .style = style
+    };
+    return true;
+}
+
+static const char *style_sgr(unsigned char style, bool linux_vt)
+{
+    switch (style) {
+    case VIEW_STYLE_H1:         return "\033[1;36m";
+    case VIEW_STYLE_H2:         return "\033[1;34m";
+    case VIEW_STYLE_H3:         return "\033[1;33m";
+    case VIEW_STYLE_BOLD:       return "\033[1m";
+    case VIEW_STYLE_ITALIC:     return linux_vt ? "\033[36m" : "\033[3m";
+    case VIEW_STYLE_STRIKE:     return linux_vt ? "\033[2m" : "\033[9;2m";
+    case VIEW_STYLE_CODE:       return "\033[33m";
+    case VIEW_STYLE_LINK:       return "\033[4;34m";
+    case VIEW_STYLE_LINK_URL:   return "\033[2m";
+    case VIEW_STYLE_QUOTE:      return linux_vt ? "\033[32m" : "\033[2;32m";
+    case VIEW_STYLE_RULE:       return "\033[2m";
+    case VIEW_STYLE_TABLE_HDR:  return "\033[1m";
+    case VIEW_STYLE_NODE:       return "\033[1;36m";
+    case VIEW_STYLE_EDGE:       return "\033[33m";
+    case VIEW_STYLE_SEARCH:     return "\033[7m";
+    case VIEW_STYLE_SEARCH_CUR: return "\033[1;30;43m";
+    default:                    return "";
+    }
+}
+
+static size_t span_lower_bound(const struct view_span *spans, size_t count,
+                               off_t byte)
+{
+    size_t lo = 0, hi = count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (spans[mid].end <= byte)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+static unsigned char span_style_at(const struct view_span *spans, size_t count,
+                                   size_t *idx, off_t byte)
+{
+    while (*idx < count && spans[*idx].end <= byte)
+        (*idx)++;
+    if (*idx < count && spans[*idx].start <= byte && byte < spans[*idx].end)
+        return spans[*idx].style;
+    return VIEW_STYLE_NONE;
+}
+
+static void emit_style(char *out, size_t *used, unsigned char *active,
+                       unsigned char want, bool linux_vt)
+{
+    if (*active == want)
+        return;
+    if (out) {
+        if (*active != VIEW_STYLE_NONE) {
+            memcpy(out + *used, "\033[0m", 4);
+            *used += 4;
+        }
+        if (want != VIEW_STYLE_NONE) {
+            const char *seq = style_sgr(want, linux_vt);
+            size_t slen = strlen(seq);
+            memcpy(out + *used, seq, slen);
+            *used += slen;
+        }
+    }
+    *active = want;
+}
 
 bool position_equal(struct position a, struct position b)
 {
@@ -73,9 +182,43 @@ size_t view_row_capacity(int width)
     return (size_t)width * 4 * (1 + MAX_MARKS) + 1;
 }
 
-int view_row_h(struct source *s, struct position start, int width,
-               int skip, bool chop, char *out, struct position *next)
+size_t view_row_styled_capacity(int width)
 {
+    return view_row_capacity(width) + (size_t)width * 16 + 8;
+}
+
+static unsigned char resolve_style(const struct view_row_style *st,
+                                   size_t *doc_idx, size_t *search_idx,
+                                   off_t byte)
+{
+    if (!st)
+        return VIEW_STYLE_NONE;
+    if (st->search_count > 0) {
+        unsigned char s = span_style_at(st->search_spans, st->search_count,
+                                        search_idx, byte);
+        if (s != VIEW_STYLE_NONE)
+            return s;
+    }
+    if (st->doc_count > 0)
+        return span_style_at(st->doc_spans, st->doc_count, doc_idx, byte);
+    return VIEW_STYLE_NONE;
+}
+
+int view_row_styled(struct source *s, struct position start, int width,
+                    int skip, bool chop, const struct view_row_style *style,
+                    char *out, struct position *next)
+{
+    bool has_style = style && (style->doc_count > 0 || style->search_count > 0);
+    const struct view_row_style *st = has_style ? style : NULL;
+    size_t doc_idx = st && st->doc_count
+                     ? span_lower_bound(st->doc_spans, st->doc_count, start.byte)
+                     : 0;
+    size_t search_idx = st && st->search_count
+                        ? span_lower_bound(st->search_spans, st->search_count, start.byte)
+                        : 0;
+    bool linux_vt = st ? st->linux_vt : false;
+    unsigned char active = VIEW_STYLE_NONE;
+
     if (skip == 0 && !chop) {
         struct position p = start;
         int cells = 0;
@@ -86,8 +229,11 @@ int view_row_h(struct source *s, struct position start, int width,
             uint32_t cp;
             int count = 0;
             bool tab = p.tab_left > 0;
+            off_t glyph_byte = p.byte;
             if (tab) {
                 cp = ' ';
+                if (glyph_byte > 0)
+                    glyph_byte--;
             } else {
                 int b = source_byte(s, p.byte);
                 if (b == VIEW_EOF) {
@@ -137,12 +283,19 @@ int view_row_h(struct source *s, struct position start, int width,
                 marks++;
             cells += g.width;
             if (out) {
+                if (st) {
+                    unsigned char want = resolve_style(st, &doc_idx, &search_idx,
+                                                       glyph_byte);
+                    emit_style(out, &used, &active, want, linux_vt);
+                }
                 memcpy(out + used, g.bytes, g.len);
                 used += g.len;
             }
         }
-        if (out)
+        if (out) {
+            emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt);
             out[used] = '\0';
+        }
         *next = p;
         return VIEW_ROW;
     }
@@ -177,6 +330,7 @@ int view_row_h(struct source *s, struct position start, int width,
             break;
         }
         if (b == '\t') {
+            off_t glyph_byte = p.byte;
             p.byte++;
             int tab_w = TAB_SIZE - (col % TAB_SIZE);
             int start_c = col;
@@ -189,6 +343,11 @@ int view_row_h(struct source *s, struct position start, int width,
                 if (spaces > width - cells)
                     spaces = width - cells;
                 if (out) {
+                    if (st) {
+                        unsigned char want = resolve_style(st, &doc_idx, &search_idx,
+                                                           glyph_byte);
+                        emit_style(out, &used, &active, want, linux_vt);
+                    }
                     memset(out + used, ' ', (size_t)spaces);
                     used += (size_t)spaces;
                 }
@@ -198,6 +357,7 @@ int view_row_h(struct source *s, struct position start, int width,
             continue;
         }
 
+        off_t glyph_byte = p.byte;
         uint32_t cp;
         int count = decode(s, p.byte, b, &cp);
         if (count < 0)
@@ -225,6 +385,11 @@ int view_row_h(struct source *s, struct position start, int width,
             if (spaces > width - cells)
                 spaces = width - cells;
             if (out) {
+                if (st) {
+                    unsigned char want = resolve_style(st, &doc_idx, &search_idx,
+                                                       glyph_byte);
+                    emit_style(out, &used, &active, want, linux_vt);
+                }
                 memset(out + used, ' ', (size_t)spaces);
                 used += (size_t)spaces;
             }
@@ -237,6 +402,11 @@ int view_row_h(struct source *s, struct position start, int width,
             continue;
         }
         if (out) {
+            if (st) {
+                unsigned char want = resolve_style(st, &doc_idx, &search_idx,
+                                                   glyph_byte);
+                emit_style(out, &used, &active, want, linux_vt);
+            }
             memcpy(out + used, g.bytes, g.len);
             used += g.len;
         }
@@ -246,16 +416,24 @@ int view_row_h(struct source *s, struct position start, int width,
         else
             marks++;
     }
-    if (out)
+    if (out) {
+        emit_style(out, &used, &active, VIEW_STYLE_NONE, linux_vt);
         out[used] = '\0';
+    }
     *next = p;
     return VIEW_ROW;
+}
+
+int view_row_h(struct source *s, struct position start, int width,
+               int skip, bool chop, char *out, struct position *next)
+{
+    return view_row_styled(s, start, width, skip, chop, NULL, out, next);
 }
 
 int view_row(struct source *s, struct position start, int width,
              char *out, struct position *next)
 {
-    return view_row_h(s, start, width, 0, false, out, next);
+    return view_row_styled(s, start, width, 0, false, NULL, out, next);
 }
 
 void view_label(char *out, size_t cap, int width, const char *text)
@@ -283,26 +461,48 @@ void view_label(char *out, size_t cap, int width, const char *text)
     out[used] = '\0';
 }
 
-int view_dump(struct source *s, int width)
+int view_dump_styled(struct source *s, int width,
+                     const struct view_styles *styles, bool linux_vt)
 {
-    // A terminal without cursor controls can still safely show plain text.
-    char buf[4 * (1 + MAX_MARKS) * 80 + 1];
+    // A terminal without cursor controls can still safely show plain or styled text.
+    char *buf = malloc(view_row_styled_capacity(width));
+    if (!buf)
+        return -1;
+    struct view_row_style rs = {
+        .doc_spans = styles ? styles->spans : NULL,
+        .doc_count = styles ? styles->count : 0,
+        .linux_vt = linux_vt
+    };
+    const struct view_row_style *rsp = rs.doc_count > 0 ? &rs : NULL;
     struct position p = {0}, next;
+    int rc = 0;
     for (;;) {
-        int result = view_row(s, p, width, buf, &next);
+        int result = view_row_styled(s, p, width, 0, false, rsp, buf, &next);
         if (result == VIEW_WAIT) {
             struct pollfd fd = {.fd = s->input, .events = POLLIN};
             int ready = poll(&fd, 1, -1);
             if (ready < 0 && errno == EINTR)
                 continue;
-            if (ready < 0 || source_pump(s) < 0)
-                return -1;
+            if (ready < 0 || source_pump(s) < 0) {
+                rc = -1;
+                break;
+            }
         } else if (result == VIEW_ROW) {
-            if (puts(buf) == EOF)
-                return -1;
+            if (puts(buf) == EOF) {
+                rc = -1;
+                break;
+            }
             p = next;
         } else {
-            return result == VIEW_EOF ? fflush(stdout) : -1;
+            rc = result == VIEW_EOF ? fflush(stdout) : -1;
+            break;
         }
     }
+    free(buf);
+    return rc;
+}
+
+int view_dump(struct source *s, int width)
+{
+    return view_dump_styled(s, width, NULL, false);
 }

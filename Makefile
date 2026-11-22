@@ -27,7 +27,7 @@ $(BUILD)/main.o: VERSION
 $(BUILD)/test-layout: tests/test-layout.c $(BUILD)/layout.o $(BUILD)/source.o $(LIBTAM)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-$(BUILD)/test-render: tests/test-render.c $(RENDER_OBJECTS) $(BUILD)/source.o $(LIBTAM)
+$(BUILD)/test-render: tests/test-render.c $(RENDER_OBJECTS) $(BUILD)/layout.o $(BUILD)/source.o $(LIBTAM)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test-pty: tests/test-pty.c

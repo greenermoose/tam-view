@@ -365,30 +365,48 @@ static void draw_box_row(struct rbuf *b, const struct mnode *n, int row,
     if (n->shape == SHAPE_DIAMOND) {
         if (row == 0 || row == 2) {
             rbuf_putc(b, ' ');
+            size_t rs = b->len;
             rbuf_repeat(b, box->h, inner);
+            rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
             rbuf_putc(b, ' ');
         } else {
+            size_t ls = b->len;
             rbuf_puts(b, "< ");
+            rbuf_push_span(b, ls, b->len, VIEW_STYLE_RULE);
+            size_t ns = b->len;
             rbuf_puts(b, n->label);
+            rbuf_push_span(b, ns, b->len, VIEW_STYLE_NODE);
+            size_t rs = b->len;
             rbuf_puts(b, " >");
+            rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
         }
         return;
     }
 
     if (row == 0) {
+        size_t rs = b->len;
         rbuf_puts(b, tl);
         rbuf_repeat(b, box->h, inner);
         rbuf_puts(b, tr);
+        rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
     } else if (row == 1) {
+        size_t ls = b->len;
         rbuf_puts(b, box->v);
+        rbuf_push_span(b, ls, b->len, VIEW_STYLE_RULE);
         rbuf_putc(b, ' ');
+        size_t ns = b->len;
         rbuf_puts(b, n->label);
+        rbuf_push_span(b, ns, b->len, VIEW_STYLE_NODE);
         rbuf_putc(b, ' ');
+        size_t rs = b->len;
         rbuf_puts(b, box->v);
+        rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
     } else {
+        size_t rs = b->len;
         rbuf_puts(b, bl);
         rbuf_repeat(b, box->h, inner);
         rbuf_puts(b, br);
+        rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
     }
 }
 
@@ -457,20 +475,33 @@ static void render_td(struct rbuf *b, struct mgraph *g, int width,
             if (g->nodes[u].layer != l)
                 continue;
             rbuf_puts(b, "  ");
+            size_t vs = b->len;
             rbuf_puts(b, box->v);
+            rbuf_push_span(b, vs, b->len, VIEW_STYLE_RULE);
             if (g->edges[e].label) {
-                rbuf_printf(b, " (%s)", g->edges[e].label);
+                rbuf_putc(b, ' ');
+                size_t es = b->len;
+                rbuf_printf(b, "(%s)", g->edges[e].label);
+                rbuf_push_span(b, es, b->len, VIEW_STYLE_EDGE);
             }
             if (g->nodes[v].layer != l + 1 || out_from_layer > 1) {
-                rbuf_printf(b, " %s [%s]",
-                            g->edges[e].arrow ? box->arrow_r : box->h,
-                            g->nodes[v].label);
+                rbuf_putc(b, ' ');
+                size_t as = b->len;
+                rbuf_puts(b, g->edges[e].arrow ? box->arrow_r : box->h);
+                rbuf_push_span(b, as, b->len, VIEW_STYLE_RULE);
+                rbuf_puts(b, " [");
+                size_t ns = b->len;
+                rbuf_puts(b, g->nodes[v].label);
+                rbuf_push_span(b, ns, b->len, VIEW_STYLE_NODE);
+                rbuf_putc(b, ']');
             }
             rbuf_putc(b, '\n');
         }
         if (l < max_layer) {
             rbuf_puts(b, "  ");
+            size_t as = b->len;
             rbuf_puts(b, box->arrow_d);
+            rbuf_push_span(b, as, b->len, VIEW_STYLE_RULE);
             rbuf_putc(b, '\n');
         }
     }
@@ -540,8 +571,10 @@ static bool try_render_lr(struct rbuf *b, struct mgraph *g, int width,
                 if (l < max_layer) {
                     if (sub == 1 && found) {
                         rbuf_puts(b, " ");
+                        size_t as = b->len;
                         rbuf_repeat(b, box->h, 2);
                         rbuf_puts(b, box->arrow_r);
+                        rbuf_push_span(b, as, b->len, VIEW_STYLE_RULE);
                         rbuf_puts(b, " ");
                     } else {
                         rbuf_puts(b, "     ");
@@ -560,11 +593,25 @@ static bool try_render_lr(struct rbuf *b, struct mgraph *g, int width,
                 rbuf_putc(b, '\n');
                 any_lbl = true;
             }
-            rbuf_printf(b, "  %s %s(%s)%s %s\n",
-                        g->nodes[g->edges[e].from].label,
-                        box->h, g->edges[e].label,
-                        g->edges[e].arrow ? box->arrow_r : box->h,
-                        g->nodes[g->edges[e].to].label);
+            rbuf_puts(b, "  ");
+            size_t fs = b->len;
+            rbuf_puts(b, g->nodes[g->edges[e].from].label);
+            rbuf_push_span(b, fs, b->len, VIEW_STYLE_NODE);
+            rbuf_putc(b, ' ');
+            size_t rs = b->len;
+            rbuf_puts(b, box->h);
+            rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
+            size_t es = b->len;
+            rbuf_printf(b, "(%s)", g->edges[e].label);
+            rbuf_push_span(b, es, b->len, VIEW_STYLE_EDGE);
+            rs = b->len;
+            rbuf_puts(b, g->edges[e].arrow ? box->arrow_r : box->h);
+            rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
+            rbuf_putc(b, ' ');
+            size_t ts = b->len;
+            rbuf_puts(b, g->nodes[g->edges[e].to].label);
+            rbuf_push_span(b, ts, b->len, VIEW_STYLE_NODE);
+            rbuf_putc(b, '\n');
         }
     }
 
@@ -609,7 +656,10 @@ void render_mermaid(struct rbuf *b, const char *src, size_t len,
                 p = skip_ws(p + 5, end);
                 header_ok = true;
             } else {
-                rbuf_puts(b, "[tam-view: unsupported or invalid mermaid diagram]\n");
+                size_t ds = b->len;
+                rbuf_puts(b, "[tam-view: unsupported or invalid mermaid diagram]");
+                rbuf_push_span(b, ds, b->len, VIEW_STYLE_EDGE);
+                rbuf_putc(b, '\n');
                 rbuf_putn(b, src, len);
                 if (len == 0 || src[len - 1] != '\n')
                     rbuf_putc(b, '\n');
@@ -665,7 +715,10 @@ void render_mermaid(struct rbuf *b, const char *src, size_t len,
     }
 
     if (!header_ok || g.n_nodes == 0) {
-        rbuf_puts(b, "[tam-view: empty or invalid mermaid flowchart]\n");
+        size_t ds = b->len;
+        rbuf_puts(b, "[tam-view: empty or invalid mermaid flowchart]");
+        rbuf_push_span(b, ds, b->len, VIEW_STYLE_EDGE);
+        rbuf_putc(b, '\n');
         rbuf_putn(b, src, len);
         if (len == 0 || src[len - 1] != '\n')
             rbuf_putc(b, '\n');

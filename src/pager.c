@@ -54,6 +54,7 @@ struct file_entry {
     const char *path;
     struct source source;
     struct source rendered;
+    struct view_styles rendered_styles;
     bool has_rendered;
     int rendered_width;
     bool render_mode;
@@ -69,6 +70,7 @@ struct file_entry {
 struct search {
     regex_t regex;
     bool valid;
+    bool highlight;
     int direction;
     int original_direction;
     off_t hit;
@@ -259,13 +261,47 @@ static int size_view(struct pager *p)
     int height = rows > 1 ? rows - 1 : 1;
     p->height = height < MAX_ROWS ? height : MAX_ROWS;
     p->width = cols < MAX_COLUMNS ? cols : MAX_COLUMNS;
-    size_t stride = view_row_capacity(p->width);
+    size_t stride = view_row_styled_capacity(p->width);
     char *text = realloc(p->next.text, (size_t)p->height * stride);
     if (!text)
         return -1;
     p->next.text = text;
     p->next.stride = stride;
     return 0;
+}
+
+static int read_logical_line(struct pager *p, off_t start,
+                             size_t *out_len, off_t *next_line);
+
+static void collect_line_matches(struct pager *p, off_t ls,
+                                 struct view_styles *out)
+{
+    out->count = 0;
+    size_t len = 0;
+    off_t next_line = 0;
+    if (read_logical_line(p, ls, &len, &next_line) != VIEW_ROW)
+        return;
+    const char *line = p->search.line;
+    size_t pos = 0;
+    while (pos <= len) {
+        regmatch_t m;
+        int flags = pos > 0 ? REG_NOTBOL : 0;
+        if (regexec(&p->search.regex, line + pos, 1, &m, flags) != 0)
+            break;
+        size_t ms = pos + (size_t)m.rm_so;
+        size_t me = pos + (size_t)m.rm_eo;
+        if (me > ms) {
+            off_t abs_s = ls + (off_t)ms;
+            off_t abs_e = ls + (off_t)me;
+            unsigned char st = (p->search.hit >= 0 && abs_s == p->search.hit)
+                               ? VIEW_STYLE_SEARCH_CUR : VIEW_STYLE_SEARCH;
+            if (!view_styles_push(out, abs_s, abs_e, st))
+                break;
+            pos = me;
+        } else {
+            pos = ms + 1;
+        }
+    }
 }
 
 static int build_page(struct pager *p, struct position *end)
@@ -288,9 +324,9 @@ static int build_page(struct pager *p, struct position *end)
             "g / G / Ng             Start / end / line N",
             "m<a-z> / '<a-z> / ''   Set mark / go to mark / previous",
             "/ / ?                  Find POSIX regex forward / backward",
-            "n / N                  Repeat / reverse search",
+            "n / N / Esc            Repeat / reverse / clear highlight",
             ":n / :p / :x / :f      Next / prev / first / current file",
-            "R                      Toggle rendered / raw view",
+            "R / C                  Toggle rendered view / color",
             "F                      Follow growing file or pipe",
             "q                      Quit and keep the page"
         };
@@ -302,19 +338,52 @@ static int build_page(struct pager *p, struct position *end)
         return VIEW_ROW;
     }
 
+    struct file_entry *cur = &p->files[p->file_index];
+    const struct view_styles *doc_st =
+        (p->opts.color && cur->render_mode && cur->has_rendered)
+        ? &cur->rendered_styles : NULL;
+    bool want_search = p->opts.color && p->search.valid && p->search.highlight;
+    struct view_styles line_matches = {0};
+    off_t cached_ls = -1;
+    int rc = VIEW_ROW;
+
     for (; f->count < p->height; f->count++) {
         struct position row = *end;
         f->rows[f->count] = row;
-        int result = view_row_h(p->source, row, p->width,
-                                p->h_offset, p->chop,
-                                f->text + f->count * f->stride, end);
-        if (result != VIEW_ROW)
-            return result;
+        if (want_search) {
+            off_t ls = line_start(p->source, row.byte);
+            if (ls >= 0 && ls != cached_ls) {
+                collect_line_matches(p, ls, &line_matches);
+                cached_ls = ls;
+            }
+        }
+        struct view_row_style rs = {
+            .doc_spans = doc_st ? doc_st->spans : NULL,
+            .doc_count = doc_st ? doc_st->count : 0,
+            .search_spans = want_search ? line_matches.spans : NULL,
+            .search_count = want_search ? line_matches.count : 0,
+            .linux_vt = p->opts.linux_vt
+        };
+        const struct view_row_style *rsp =
+            (rs.doc_count > 0 || rs.search_count > 0) ? &rs : NULL;
+        int result = view_row_styled(p->source, row, p->width,
+                                     p->h_offset, p->chop, rsp,
+                                     f->text + f->count * f->stride, end);
+        if (result != VIEW_ROW) {
+            rc = result;
+            goto done;
+        }
     }
-    if (end->tab_left)
-        return VIEW_ROW;
+    if (end->tab_left) {
+        rc = VIEW_ROW;
+        goto done;
+    }
     int b = source_byte(p->source, end->byte);
-    return b < 0 ? b : VIEW_ROW;
+    rc = b < 0 ? b : VIEW_ROW;
+
+done:
+    view_styles_free(&line_matches);
+    return rc;
 }
 
 static void status(struct pager *p, int page_state, char *out, size_t cap)
@@ -504,10 +573,12 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
         return;
     if (f->has_rendered) {
         source_close(&f->rendered);
+        view_styles_free(&f->rendered_styles);
         f->has_rendered = false;
     }
     if (view_render_source(&f->source, f->path, p->width, p->opts.ascii,
-                           f->force_render, &f->rendered) == 0) {
+                           f->force_render, &f->rendered,
+                           &f->rendered_styles) == 0) {
         f->has_rendered = true;
         f->rendered_width = p->width;
     } else {
@@ -617,6 +688,8 @@ static void start_search(struct pager *p, int direction, bool repeat)
         p->message = "No previous search";
         return;
     }
+    s->highlight = true;
+    p->current.valid = false;
     s->direction = direction;
 
     off_t anchor = repeat && s->hit >= 0 ? s->hit : p->top.byte;
@@ -1027,6 +1100,11 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         } else if (p->job != IDLE) {
             p->job = IDLE;
             p->message = "Canceled";
+        } else if (p->search.highlight) {
+            p->search.highlight = false;
+            p->search.hit = -1;
+            p->current.valid = false;
+            p->message = "Highlight cleared";
         }
         p->count = 0;
         return 0;
@@ -1092,6 +1170,11 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->current.valid = false;
         p->message = cur->render_mode ? "Render mode" : "Raw mode";
         return 0;
+    } else if (c == 'C') {
+        p->opts.color = !p->opts.color;
+        p->current.valid = false;
+        p->message = p->opts.color ? "Color on" : "Color off";
+        return 0;
     } else if (c == 'g' || key.type == TAM_KEY_HOME) {
         save_jump_mark(p);
         p->search.hit = -1;
@@ -1134,7 +1217,10 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             p->remaining = (unsigned)movement;
             p->job = ADVANCE;
         }
-        p->search.hit = -1;
+        if (p->search.hit >= 0) {
+            p->search.hit = -1;
+            p->current.valid = false;
+        }
     }
     return 0;
 }
@@ -1411,8 +1497,10 @@ cleanup:;
     free(p.search.line);
     free(p.next.text);
     for (size_t i = 0; i < count; i++) {
-        if (files[i].has_rendered)
+        if (files[i].has_rendered) {
             source_close(&files[i].rendered);
+            view_styles_free(&files[i].rendered_styles);
+        }
         if (files[i].opened)
             source_close(&files[i].source);
         if (files[i].own_fd && files[i].fd >= 0)

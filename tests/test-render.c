@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-static char *render_str(enum view_format fmt, const char *input, int width, bool ascii)
+static char *render_str_styles(enum view_format fmt, const char *input,
+                               int width, bool ascii,
+                               struct view_styles *styles_out)
 {
     struct rbuf b;
     rbuf_init(&b);
@@ -19,7 +21,37 @@ static char *render_str(enum view_format fmt, const char *input, int width, bool
     else
         render_mermaid(&b, input, len, width, ascii);
     assert(!b.oom);
+    // Rendered text must never contain raw ESC bytes.
+    if (b.data)
+        assert(memchr(b.data, '\033', b.len) == NULL);
+    // Verify spans are sorted and non-overlapping.
+    for (size_t i = 0; i < b.styles.count; i++) {
+        assert(b.styles.spans[i].start < b.styles.spans[i].end);
+        assert((size_t)b.styles.spans[i].end <= b.len);
+        if (i > 0)
+            assert(b.styles.spans[i - 1].end <= b.styles.spans[i].start);
+    }
+    if (styles_out) {
+        *styles_out = b.styles;
+        b.styles = (struct view_styles){0};
+    } else {
+        view_styles_free(&b.styles);
+    }
     return b.data ? b.data : strdup("");
+}
+
+static char *render_str(enum view_format fmt, const char *input, int width, bool ascii)
+{
+    return render_str_styles(fmt, input, width, ascii, NULL);
+}
+
+static bool has_style(const struct view_styles *st, unsigned char style)
+{
+    for (size_t i = 0; i < st->count; i++) {
+        if (st->spans[i].style == style)
+            return true;
+    }
+    return false;
 }
 
 static void test_detect(void)
@@ -59,7 +91,8 @@ static void test_markdown(void)
         "  A[Start] --> B[End]\n"
         "```\n";
 
-    char *uni = render_str(VIEW_FORMAT_MARKDOWN, md, 60, false);
+    struct view_styles st = {0};
+    char *uni = render_str_styles(VIEW_FORMAT_MARKDOWN, md, 60, false, &st);
     assert(strstr(uni, "Title\n"));
     assert(strstr(uni, "\xe2\x95\x90\xe2\x95\x90\xe2\x95\x90"));
     assert(strstr(uni, "bold and code link (https://example.com)"));
@@ -68,6 +101,16 @@ static void test_markdown(void)
     assert(strstr(uni, "\xe2\x94\x8c"));
     assert(strstr(uni, "Start"));
     assert(strstr(uni, "End"));
+    assert(has_style(&st, VIEW_STYLE_H1));
+    assert(has_style(&st, VIEW_STYLE_BOLD));
+    assert(has_style(&st, VIEW_STYLE_CODE));
+    assert(has_style(&st, VIEW_STYLE_LINK));
+    assert(has_style(&st, VIEW_STYLE_LINK_URL));
+    assert(has_style(&st, VIEW_STYLE_QUOTE));
+    assert(has_style(&st, VIEW_STYLE_RULE));
+    assert(has_style(&st, VIEW_STYLE_TABLE_HDR));
+    assert(has_style(&st, VIEW_STYLE_NODE));
+    view_styles_free(&st);
     free(uni);
 
     char *asc = render_str(VIEW_FORMAT_MARKDOWN, md, 60, true);
@@ -89,7 +132,8 @@ static void test_html(void)
         "<table><tr><th>K</th><th>V</th></tr><tr><td>x</td><td>1</td></tr></table>"
         "</body></html>";
 
-    char *out = render_str(VIEW_FORMAT_HTML, html, 72, true);
+    struct view_styles st = {0};
+    char *out = render_str_styles(VIEW_FORMAT_HTML, html, 72, true, &st);
     assert(!strstr(out, "Ignored"));
     assert(!strstr(out, "alert(1)"));
     assert(strstr(out, "Hello & Welcome"));
@@ -97,6 +141,12 @@ static void test_html(void)
     assert(strstr(out, "* One"));
     assert(strstr(out, "* Two"));
     assert(strstr(out, "+---+---+"));
+    assert(has_style(&st, VIEW_STYLE_H1));
+    assert(has_style(&st, VIEW_STYLE_LINK));
+    assert(has_style(&st, VIEW_STYLE_LINK_URL));
+    assert(has_style(&st, VIEW_STYLE_TABLE_HDR));
+    assert(has_style(&st, VIEW_STYLE_RULE));
+    view_styles_free(&st);
     free(out);
 
     char *out_u = render_str(VIEW_FORMAT_HTML, "<p>&ldquo;hi&rdquo;</p>", 72, false);
@@ -113,7 +163,8 @@ static void test_mermaid(void)
         "  C -->|yes| D[Done]\n"
         "  C -->|no| A\n";
 
-    char *out_td = render_str(VIEW_FORMAT_MERMAID, td, 72, true);
+    struct view_styles st = {0};
+    char *out_td = render_str_styles(VIEW_FORMAT_MERMAID, td, 72, true, &st);
     assert(strstr(out_td, "+-------+"));
     assert(strstr(out_td, "| Input |"));
     assert(strstr(out_td, "< Valid? >"));
@@ -123,6 +174,10 @@ static void test_mermaid(void)
     // Cycle back-edge A <- C must not push Input below Valid?.
     assert(strstr(out_td, "| Input |") < strstr(out_td, "< Valid? >"));
     assert(strstr(out_td, "< Valid? >") < strstr(out_td, "| Done |"));
+    assert(has_style(&st, VIEW_STYLE_RULE));
+    assert(has_style(&st, VIEW_STYLE_NODE));
+    assert(has_style(&st, VIEW_STYLE_EDGE));
+    view_styles_free(&st);
     free(out_td);
 
     const char *lr =

@@ -10,7 +10,7 @@
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [-r|--raw] [-R|--render] [--ascii] [--] [FILE|- ...]\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [--ascii] [--color[=WHEN]|--no-color] [--] [FILE|- ...]\n"
           "View files or piped input. Markup renders by default; the final page stays visible.\n"
           "Press h for keys, or q to quit.\n", out);
 }
@@ -95,6 +95,14 @@ int main(int argc, char **argv)
             opts.mode = VIEW_MODE_RENDER;
         } else if (options && !strcmp(arg, "--ascii")) {
             opts.ascii = true;
+        } else if (options && (!strcmp(arg, "--color") ||
+                               !strcmp(arg, "--color=always"))) {
+            opts.color_mode = VIEW_COLOR_ALWAYS;
+        } else if (options && !strcmp(arg, "--color=auto")) {
+            opts.color_mode = VIEW_COLOR_AUTO;
+        } else if (options && (!strcmp(arg, "--no-color") ||
+                               !strcmp(arg, "--color=never"))) {
+            opts.color_mode = VIEW_COLOR_NEVER;
         } else if (options && !strcmp(arg, "--help")) {
             free(inputs);
             usage(stdout);
@@ -116,10 +124,16 @@ int main(int argc, char **argv)
 
     setlocale(LC_CTYPE, "");
     const char *term = getenv("TERM");
-    if (term && !strcmp(term, "linux"))
+    const char *no_color = getenv("NO_COLOR");
+    bool env_no_color = no_color && no_color[0] != '\0';
+    bool is_dumb = !term || !strcmp(term, "dumb");
+    if (term && !strcmp(term, "linux")) {
         opts.ascii = true;
+        opts.linux_vt = true;
+    }
 
     if (!isatty(STDOUT_FILENO)) {
+        opts.color = (opts.color_mode == VIEW_COLOR_ALWAYS);
         int status = 0;
         for (size_t i = 0; i < file_count; i++) {
             const char *label = inputs[i].path;
@@ -143,13 +157,18 @@ int main(int argc, char **argv)
                     break;
                 }
                 struct source rendered;
+                struct view_styles styles = {0};
                 int rc = view_render_source(&s, label, 80, opts.ascii,
-                                            true, &rendered);
+                                            true, &rendered,
+                                            opts.color ? &styles : NULL);
                 if (rc == 0) {
-                    rc = view_dump(&rendered, 80);
+                    rc = view_dump_styled(&rendered, 80,
+                                          opts.color ? &styles : NULL,
+                                          opts.linux_vt);
                     source_close(&rendered);
                 }
                 int err = errno;
+                view_styles_free(&styles);
                 source_close(&s);
                 if (fd != STDIN_FILENO)
                     close(fd);
@@ -186,13 +205,16 @@ int main(int argc, char **argv)
     inputs[0].path = first_label;
     inputs[0].fd = input;
 
-    int tty = term && strcmp(term, "dumb")
-                ? open("/dev/tty", O_RDWR | O_CLOEXEC) : -1;
+    int tty = !is_dumb ? open("/dev/tty", O_RDWR | O_CLOEXEC) : -1;
     int result = 0;
     if (tty >= 0) {
+        opts.color = opts.color_mode == VIEW_COLOR_ALWAYS ? true
+                   : opts.color_mode == VIEW_COLOR_NEVER  ? false
+                                                          : (!env_no_color && !is_dumb);
         result = view_interactive(inputs, file_count, tty, opts);
         close(tty);
     } else {
+        opts.color = (opts.color_mode == VIEW_COLOR_ALWAYS);
         for (size_t i = 0; i < file_count; i++) {
             int fd = i == 0 ? input : open_input(inputs[i].path, &first_label);
             if (fd < 0) {
@@ -212,18 +234,23 @@ int main(int argc, char **argv)
             }
             if (opts.mode != VIEW_MODE_RAW) {
                 struct source rendered;
+                struct view_styles styles = {0};
                 const char *lbl = i == 0 ? first_label : inputs[i].path;
                 int rc = view_render_source(&s, lbl, 80, opts.ascii,
                                             opts.mode == VIEW_MODE_RENDER,
-                                            &rendered);
+                                            &rendered,
+                                            opts.color ? &styles : NULL);
                 if (rc == 0) {
-                    result = view_dump(&rendered, 80);
+                    result = view_dump_styled(&rendered, 80,
+                                              opts.color ? &styles : NULL,
+                                              opts.linux_vt);
                     source_close(&rendered);
                 } else if (errno == EINVAL) {
                     result = view_dump(&s, 80);
                 } else {
                     result = -1;
                 }
+                view_styles_free(&styles);
             } else {
                 result = view_dump(&s, 80);
             }

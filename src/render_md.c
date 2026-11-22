@@ -27,7 +27,9 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                     while (j + close_t < len && s[j + close_t] == '`')
                         close_t++;
                     if (close_t == ticks) {
+                        size_t s0 = out->len;
                         rbuf_putn(out, s + i + ticks, j - (i + ticks));
+                        rbuf_push_span(out, s0, out->len, VIEW_STYLE_CODE);
                         i = j + close_t;
                         found = true;
                         break;
@@ -88,17 +90,23 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                     while (url_len > 0 && isspace((unsigned char)s[url_start + url_len - 1]))
                         url_len--;
                     if (is_img) {
+                        size_t s0 = out->len;
                         rbuf_puts(out, "[image: ");
                         inline_md(out, s + start, lbl_len);
                         rbuf_putc(out, ']');
+                        rbuf_fill_style(out, s0, out->len, VIEW_STYLE_LINK_URL);
                     } else {
+                        size_t s0 = out->len;
                         inline_md(out, s + start, lbl_len);
+                        rbuf_fill_style(out, s0, out->len, VIEW_STYLE_LINK);
                         if (url_len > 0 &&
                             !(url_len == lbl_len &&
                               memcmp(s + start, s + url_start, url_len) == 0)) {
+                            size_t u0 = out->len;
                             rbuf_puts(out, " (");
                             rbuf_putn(out, s + url_start, url_len);
                             rbuf_putc(out, ')');
+                            rbuf_push_span(out, u0, out->len, VIEW_STYLE_LINK_URL);
                         }
                     }
                     i = url_end + 1;
@@ -119,7 +127,10 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                 j++;
             }
             if (closed) {
+                size_t s0 = out->len;
                 inline_md(out, s + i + 2, j - (i + 2));
+                rbuf_fill_style(out, s0, out->len,
+                                mark == '~' ? VIEW_STYLE_STRIKE : VIEW_STYLE_BOLD);
                 i = j + 2;
                 continue;
             }
@@ -137,7 +148,9 @@ static void inline_md(struct rbuf *out, const char *s, size_t len)
                 j++;
             }
             if (closed && (mark == '*' || i == 0 || !isalnum((unsigned char)s[i - 1]))) {
+                size_t s0 = out->len;
                 inline_md(out, s + i + 1, j - (i + 1));
+                rbuf_fill_style(out, s0, out->len, VIEW_STYLE_ITALIC);
                 i = j + 1;
                 continue;
             }
@@ -213,7 +226,7 @@ static bool parse_table_row(const char *line, size_t len, struct rtable *t)
 
     size_t cap = 4;
     size_t ncols = 0;
-    char **cells = calloc(cap, sizeof(*cells));
+    struct rbuf *cells = calloc(cap, sizeof(*cells));
     if (!cells)
         return false;
 
@@ -232,17 +245,17 @@ static bool parse_table_row(const char *line, size_t len, struct rtable *t)
         inline_md(&cell, line + cs, ce - cs);
         if (ncols == cap) {
             cap *= 2;
-            char **grown = realloc(cells, cap * sizeof(*cells));
+            struct rbuf *grown = realloc(cells, cap * sizeof(*cells));
             if (!grown) {
                 rbuf_free(&cell);
                 for (size_t k = 0; k < ncols; k++)
-                    free(cells[k]);
+                    rbuf_free(&cells[k]);
                 free(cells);
                 return false;
             }
             cells = grown;
         }
-        cells[ncols++] = cell.data ? cell.data : strdup("");
+        cells[ncols++] = cell;
         if (i >= end)
             break;
         i++;
@@ -251,7 +264,7 @@ static bool parse_table_row(const char *line, size_t len, struct rtable *t)
     struct rtable_row *rows = realloc(t->rows, (t->nrows + 1) * sizeof(*rows));
     if (!rows) {
         for (size_t k = 0; k < ncols; k++)
-            free(cells[k]);
+            rbuf_free(&cells[k]);
         free(cells);
         return false;
     }
@@ -298,20 +311,26 @@ static void emit_heading(struct rbuf *b, int level, const char *text,
                          size_t len, int width, bool ascii)
 {
     const struct box_chars *box = render_box_chars(ascii);
+    unsigned char hstyle = level == 1 ? VIEW_STYLE_H1
+                         : level == 2 ? VIEW_STYLE_H2
+                                      : VIEW_STYLE_H3;
     rbuf_blank_line(b);
     struct rbuf tmp;
     rbuf_init(&tmp);
     inline_md(&tmp, text, len);
+    rbuf_fill_style(&tmp, 0, tmp.len, hstyle);
     const char *s = tmp.data ? tmp.data : "";
 
     if (level <= 2) {
-        rbuf_wrap(b, s, width, "", "");
+        rbuf_wrap_styled(b, &tmp, width, "", "", VIEW_STYLE_NONE);
         int w = render_str_width(s, strlen(s));
         if (w > width)
             w = width;
         if (w < 3)
             w = 3;
+        size_t rs = b->len;
         rbuf_repeat(b, level == 1 ? box->d_h : box->h, w);
+        rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
         rbuf_putc(b, '\n');
     } else {
         char pfx[16];
@@ -319,7 +338,7 @@ static void emit_heading(struct rbuf *b, int level, const char *text,
         memset(pfx, '#', (size_t)n);
         pfx[n] = ' ';
         pfx[n + 1] = '\0';
-        rbuf_wrap(b, s, width, pfx, "  ");
+        rbuf_wrap_styled(b, &tmp, width, pfx, "  ", hstyle);
     }
     rbuf_free(&tmp);
 }
@@ -347,8 +366,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
         if (ws == llen) {
             if (para.len > 0) {
                 rbuf_blank_line(b);
-                rbuf_wrap(b, para.data, width, "", "");
-                para.len = 0;
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             }
             pos = next;
             continue;
@@ -359,8 +378,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
                           (line[0] == '~' && line[1] == '~' && line[2] == '~'))) {
             if (para.len > 0) {
                 rbuf_blank_line(b);
-                rbuf_wrap(b, para.data, width, "", "");
-                para.len = 0;
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             }
             char fence = line[0];
             size_t flen = 0;
@@ -409,8 +428,10 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
                     const char *cl = NULL;
                     size_t clen = 0;
                     cp = next_line(code.data, code.len, cp, &cl, &clen);
+                    size_t cs = b->len;
                     rbuf_puts(b, "    ");
                     rbuf_putn(b, cl, clen);
+                    rbuf_push_span(b, cs, b->len, VIEW_STYLE_CODE);
                     rbuf_putc(b, '\n');
                 }
             }
@@ -426,8 +447,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
             if (h < llen && (line[h] == ' ' || line[h] == '\t')) {
                 if (para.len > 0) {
                     rbuf_blank_line(b);
-                    rbuf_wrap(b, para.data, width, "", "");
-                    para.len = 0;
+                    rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                    rbuf_clear(&para);
                 }
                 size_t ts = h;
                 while (ts < llen && isspace((unsigned char)line[ts]))
@@ -449,12 +470,14 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
         if (is_hrule(line, llen)) {
             if (para.len > 0) {
                 rbuf_blank_line(b);
-                rbuf_wrap(b, para.data, width, "", "");
-                para.len = 0;
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             }
             rbuf_blank_line(b);
             int rw = width > 72 ? 72 : width;
+            size_t rs = b->len;
             rbuf_repeat(b, box->h, rw);
+            rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
             rbuf_putc(b, '\n');
             pos = next;
             continue;
@@ -468,8 +491,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
             if (is_table_sep(l2, l2_len)) {
                 if (para.len > 0) {
                     rbuf_blank_line(b);
-                    rbuf_wrap(b, para.data, width, "", "");
-                    para.len = 0;
+                    rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                    rbuf_clear(&para);
                 }
                 struct rtable t = {.has_header = true};
                 parse_table_row(line, llen, &t);
@@ -498,8 +521,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
         if (line[ws] == '>') {
             if (para.len > 0) {
                 rbuf_blank_line(b);
-                rbuf_wrap(b, para.data, width, "", "");
-                para.len = 0;
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             }
             rbuf_blank_line(b);
             struct rbuf bq;
@@ -523,7 +546,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
             }
             char pfx[8];
             snprintf(pfx, sizeof(pfx), "%s ", box->v);
-            rbuf_wrap(b, bq.data ? bq.data : "", width, pfx, pfx);
+            rbuf_fill_style(&bq, 0, bq.len, VIEW_STYLE_QUOTE);
+            rbuf_wrap_styled(b, &bq, width, pfx, pfx, VIEW_STYLE_QUOTE);
             rbuf_free(&bq);
             continue;
         }
@@ -537,8 +561,8 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
                             sizeof(num_buf), &off)) {
             if (para.len > 0) {
                 rbuf_blank_line(b);
-                rbuf_wrap(b, para.data, width, "", "");
-                para.len = 0;
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             } else if (b->len > 0) {
                 rbuf_newline(b);
             }
@@ -564,7 +588,7 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
                 memset(cpfx, ' ', (size_t)cw);
                 cpfx[cw] = '\0';
             }
-            rbuf_wrap(b, item.data ? item.data : "", width, fpfx, cpfx);
+            rbuf_wrap_styled(b, &item, width, fpfx, cpfx, VIEW_STYLE_BOLD);
             rbuf_free(&item);
             pos = next;
             continue;
@@ -604,7 +628,7 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
 
     if (para.len > 0) {
         rbuf_blank_line(b);
-        rbuf_wrap(b, para.data, width, "", "");
+        rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
     }
     rbuf_free(&para);
 }

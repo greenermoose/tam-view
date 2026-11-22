@@ -1,6 +1,6 @@
 # P1 — Reliable text viewing
 
-Status: 0.0.1 implemented. 0.1.0 remains planned.
+Status: 0.0.1 and 0.1.0 implemented (W1, W2).
 
 ## 0.0.1
 

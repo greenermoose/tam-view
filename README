@@ -4,7 +4,7 @@ tam-view reads text files and piped input. It borrows its navigation
 from less and leaves the last page visible when you reach the end or
 press q. The shell prompt appears on the line below the text.
 
-Follows the tam-idol 0.2.0 standard.
+Follows the tam-idol 1.1.0 standard.
 
 
 BUILD AND TRY
@@ -19,6 +19,7 @@ BUILD AND TRY
     build/tam-view README
     build/tam-view -r README.md
     build/tam-view -R --ascii ROADMAP.md
+    build/tam-view --no-color sandbox/demo.md
     build/tam-view README ROADMAP.md
     printf 'one\ntwo\n' | build/tam-view
     build/tam-view --raw -- filename
@@ -44,14 +45,18 @@ KEYS
   n, N                 Repeat the search or reverse its direction
   :n, :p, :x, :f       Next, previous, first, or current file in list
   R                    Toggle rendered / raw view
+  C                    Toggle color and search highlighting
   F                    Follow growing file or pipe (Ctrl-C stops)
-  Esc, Ctrl-C          Cancel a search, follow mode, or pending movement
+  Esc, Ctrl-C          Cancel a search/follow, or clear search highlight
   Ctrl-Z               Suspend and restore the shell's tty settings
   h                    Help
   q                    Quit and keep the visible text
 
   Searches are case-sensitive. Enter submits a query and Backspace
-  removes a character. Redirected output is a byte-for-byte copy.
+  removes a character. Redirected output is a byte-for-byte copy
+  unless -R/--render is passed (plain text unless --color is also set).
+  Color respects --color[=auto|always|never], --no-color, NO_COLOR,
+  TERM=dumb, and TERM=linux.
   The viewer uses the primary screen on the Linux console and
   ANSI terminals such as tam-last. Scrollback, where available, is
   maintained by the terminal.

@@ -1,6 +1,6 @@
 # P2 — Render markup for text terminals
 
-Status: planned for 0.2.x, following the text milestones in P1.
+Status: 0.2.0 implemented (W3).
 
 Raw mode shows the source and is the default. Add a render mode that
 turns Markdown and HTML into headings, lists, paragraphs, code, links

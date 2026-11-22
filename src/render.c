@@ -69,9 +69,18 @@ void rbuf_init(struct rbuf *b)
     *b = (struct rbuf){0};
 }
 
+void rbuf_clear(struct rbuf *b)
+{
+    b->len = 0;
+    if (b->data)
+        b->data[0] = '\0';
+    b->styles.count = 0;
+}
+
 void rbuf_free(struct rbuf *b)
 {
     free(b->data);
+    view_styles_free(&b->styles);
     *b = (struct rbuf){0};
 }
 
@@ -179,11 +188,129 @@ int render_str_width(const char *s, size_t len)
     return tam_uni_str_width(s, len);
 }
 
-void rbuf_wrap(struct rbuf *b, const char *text, int width,
-               const char *first_prefix, const char *cont_prefix)
+void rbuf_push_span(struct rbuf *b, size_t start, size_t end,
+                    unsigned char style)
 {
-    if (!text)
+    if (b->oom || end <= start || style == VIEW_STYLE_NONE)
         return;
+    if (!view_styles_push(&b->styles, (off_t)start, (off_t)end, style))
+        b->oom = true;
+}
+
+void rbuf_fill_style(struct rbuf *b, size_t start, size_t end,
+                     unsigned char style)
+{
+    if (b->oom || end <= start || style == VIEW_STYLE_NONE)
+        return;
+    off_t s = (off_t)start;
+    off_t e = (off_t)end;
+    if (b->styles.count == 0 ||
+        b->styles.spans[b->styles.count - 1].end <= s) {
+        rbuf_push_span(b, start, end, style);
+        return;
+    }
+
+    struct view_styles merged = {0};
+    size_t i = 0;
+    while (i < b->styles.count && b->styles.spans[i].end <= s) {
+        if (!view_styles_push(&merged, b->styles.spans[i].start,
+                              b->styles.spans[i].end,
+                              b->styles.spans[i].style)) {
+            view_styles_free(&merged);
+            b->oom = true;
+            return;
+        }
+        i++;
+    }
+    off_t cur = s;
+    while (i < b->styles.count && b->styles.spans[i].start < e) {
+        struct view_span sp = b->styles.spans[i++];
+        if (sp.start > cur) {
+            if (!view_styles_push(&merged, cur, sp.start, style)) {
+                view_styles_free(&merged);
+                b->oom = true;
+                return;
+            }
+        }
+        if (!view_styles_push(&merged, sp.start, sp.end, sp.style)) {
+            view_styles_free(&merged);
+            b->oom = true;
+            return;
+        }
+        if (sp.end > cur)
+            cur = sp.end;
+    }
+    if (cur < e) {
+        if (!view_styles_push(&merged, cur, e, style)) {
+            view_styles_free(&merged);
+            b->oom = true;
+            return;
+        }
+    }
+    while (i < b->styles.count) {
+        if (!view_styles_push(&merged, b->styles.spans[i].start,
+                              b->styles.spans[i].end,
+                              b->styles.spans[i].style)) {
+            view_styles_free(&merged);
+            b->oom = true;
+            return;
+        }
+        i++;
+    }
+    view_styles_free(&b->styles);
+    b->styles = merged;
+}
+
+static unsigned char rbuf_style_at(const struct rbuf *src, size_t off)
+{
+    if (!src || src->styles.count == 0)
+        return VIEW_STYLE_NONE;
+    size_t lo = 0, hi = src->styles.count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (src->styles.spans[mid].end <= (off_t)off)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    if (lo < src->styles.count &&
+        src->styles.spans[lo].start <= (off_t)off &&
+        (off_t)off < src->styles.spans[lo].end)
+        return src->styles.spans[lo].style;
+    return VIEW_STYLE_NONE;
+}
+
+void rbuf_copy_spans(struct rbuf *dst, size_t dst_off, const struct rbuf *src,
+                     size_t src_off, size_t len)
+{
+    if (!src || dst->oom || len == 0 || src->styles.count == 0)
+        return;
+    off_t s = (off_t)src_off;
+    off_t e = (off_t)(src_off + len);
+    size_t lo = 0, hi = src->styles.count;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (src->styles.spans[mid].end <= s)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    for (size_t i = lo; i < src->styles.count && src->styles.spans[i].start < e; i++) {
+        off_t cs = src->styles.spans[i].start > s ? src->styles.spans[i].start : s;
+        off_t ce = src->styles.spans[i].end < e ? src->styles.spans[i].end : e;
+        rbuf_push_span(dst, dst_off + (size_t)(cs - s),
+                       dst_off + (size_t)(ce - s),
+                       src->styles.spans[i].style);
+    }
+}
+
+void rbuf_wrap_styled(struct rbuf *b, const struct rbuf *src, int width,
+                      const char *first_prefix, const char *cont_prefix,
+                      unsigned char pfx_style)
+{
+    if (!src || !src->data)
+        return;
+    const char *text = src->data;
     const char *fp = first_prefix ? first_prefix : "";
     const char *cp = cont_prefix ? cont_prefix : fp;
     int fp_w = render_str_width(fp, strlen(fp));
@@ -197,31 +324,44 @@ void rbuf_wrap(struct rbuf *b, const char *text, int width,
 
     bool first_line = true;
     int line_w = fp_w;
+    size_t pfx_start = b->len;
     rbuf_puts(b, fp);
+    if (pfx_style != VIEW_STYLE_NONE && b->len > pfx_start)
+        rbuf_push_span(b, pfx_start, b->len, pfx_style);
 
     while (*p) {
         const char *ws = p;
         while (*p && !isspace((unsigned char)*p))
             p++;
+        size_t ws_off = (size_t)(ws - text);
         size_t wlen = (size_t)(p - ws);
         int ww = render_str_width(ws, wlen);
 
         int max_w = width;
-        const char *pfx = first_line ? fp : cp;
         int pfx_w = first_line ? fp_w : cp_w;
-        (void)pfx;
 
         if (line_w > pfx_w && line_w + 1 + ww > max_w) {
             rbuf_putc(b, '\n');
             first_line = false;
+            size_t cp_start = b->len;
             rbuf_puts(b, cp);
+            if (pfx_style != VIEW_STYLE_NONE && b->len > cp_start)
+                rbuf_push_span(b, cp_start, b->len, pfx_style);
             line_w = cp_w;
         } else if (line_w > pfx_w) {
+            size_t sp_dst = b->len;
             rbuf_putc(b, ' ');
+            if (ws_off > 0) {
+                unsigned char sp_st = rbuf_style_at(src, ws_off - 1);
+                if (sp_st != VIEW_STYLE_NONE)
+                    rbuf_push_span(b, sp_dst, b->len, sp_st);
+            }
             line_w++;
         }
 
+        size_t word_dst = b->len;
         rbuf_putn(b, ws, wlen);
+        rbuf_copy_spans(b, word_dst, src, ws_off, wlen);
         line_w += ww;
 
         while (*p && isspace((unsigned char)*p))
@@ -230,11 +370,20 @@ void rbuf_wrap(struct rbuf *b, const char *text, int width,
     rbuf_putc(b, '\n');
 }
 
+void rbuf_wrap(struct rbuf *b, const char *text, int width,
+               const char *first_prefix, const char *cont_prefix)
+{
+    if (!text)
+        return;
+    struct rbuf tmp = {.data = (char *)text, .len = strlen(text)};
+    rbuf_wrap_styled(b, &tmp, width, first_prefix, cont_prefix, VIEW_STYLE_NONE);
+}
+
 void rtable_free(struct rtable *t)
 {
     for (size_t r = 0; r < t->nrows; r++) {
         for (size_t c = 0; c < t->rows[r].ncols; c++)
-            free(t->rows[r].cells[c]);
+            rbuf_free(&t->rows[r].cells[c]);
         free(t->rows[r].cells);
     }
     free(t->rows);
@@ -245,11 +394,13 @@ static void render_table_border(struct rbuf *b, const int *col_w, size_t ncols,
                                 const char *left, const char *mid,
                                 const char *right, const char *h)
 {
+    size_t start = b->len;
     rbuf_puts(b, left);
     for (size_t c = 0; c < ncols; c++) {
         rbuf_repeat(b, h, col_w[c] + 2);
         rbuf_puts(b, c + 1 < ncols ? mid : right);
     }
+    rbuf_push_span(b, start, b->len, VIEW_STYLE_RULE);
     rbuf_putc(b, '\n');
 }
 
@@ -267,8 +418,9 @@ void render_table(struct rbuf *b, const struct rtable *t, int width, bool ascii)
 
     for (size_t r = 0; r < t->nrows; r++) {
         for (size_t c = 0; c < t->rows[r].ncols; c++) {
-            const char *cell = t->rows[r].cells[c] ? t->rows[r].cells[c] : "";
-            int w = render_str_width(cell, strlen(cell));
+            const struct rbuf *cb = &t->rows[r].cells[c];
+            const char *cell = cb->data ? cb->data : "";
+            int w = render_str_width(cell, cb->len);
             if (w > col_w[c])
                 col_w[c] = w;
         }
@@ -300,15 +452,24 @@ void render_table(struct rbuf *b, const struct rtable *t, int width, bool ascii)
 
     render_table_border(b, col_w, ncols, box->tl, box->tt, box->tr, box->h);
     for (size_t r = 0; r < t->nrows; r++) {
+        bool is_hdr = (r == 0 && t->has_header);
+        size_t vs = b->len;
         rbuf_puts(b, box->v);
+        rbuf_push_span(b, vs, b->len, VIEW_STYLE_RULE);
         for (size_t c = 0; c < ncols; c++) {
-            const char *cell = (c < t->rows[r].ncols && t->rows[r].cells[c])
-                               ? t->rows[r].cells[c] : "";
-            size_t clen = strlen(cell);
+            const struct rbuf *cb = c < t->rows[r].ncols
+                                    ? &t->rows[r].cells[c] : NULL;
+            const char *cell = (cb && cb->data) ? cb->data : "";
+            size_t clen = cb ? cb->len : 0;
             int cw = render_str_width(cell, clen);
             rbuf_putc(b, ' ');
+            size_t cell_dst = b->len;
             if (cw <= col_w[c]) {
                 rbuf_putn(b, cell, clen);
+                if (cb)
+                    rbuf_copy_spans(b, cell_dst, cb, 0, clen);
+                if (is_hdr && b->len > cell_dst)
+                    rbuf_fill_style(b, cell_dst, b->len, VIEW_STYLE_TABLE_HDR);
                 rbuf_repeat(b, " ", col_w[c] - cw);
             } else {
                 char *fit = malloc(clen + 1);
@@ -320,16 +481,23 @@ void render_table(struct rbuf *b, const struct rtable *t, int width, bool ascii)
                 int used = tam_uni_fit(cell, clen,
                                        col_w[c] > 1 ? col_w[c] - 1 : col_w[c],
                                        fit, clen + 1);
-                rbuf_puts(b, fit);
+                size_t flen = strlen(fit);
+                rbuf_putn(b, fit, flen);
+                if (cb)
+                    rbuf_copy_spans(b, cell_dst, cb, 0, flen);
                 free(fit);
                 if (col_w[c] > 1) {
                     rbuf_puts(b, ascii ? "~" : "\xe2\x80\xa6");
                     used++;
                 }
+                if (is_hdr && b->len > cell_dst)
+                    rbuf_fill_style(b, cell_dst, b->len, VIEW_STYLE_TABLE_HDR);
                 rbuf_repeat(b, " ", col_w[c] - used);
             }
             rbuf_putc(b, ' ');
+            vs = b->len;
             rbuf_puts(b, box->v);
+            rbuf_push_span(b, vs, b->len, VIEW_STYLE_RULE);
         }
         rbuf_putc(b, '\n');
         if (r == 0 && t->has_header && t->nrows > 1)
@@ -478,8 +646,11 @@ static int read_all_source(struct source *s, char **out_buf, size_t *out_len)
 }
 
 int view_render_source(struct source *raw, const char *path, int width,
-                       bool ascii, bool force_render, struct source *out)
+                       bool ascii, bool force_render, struct source *out,
+                       struct view_styles *styles_out)
 {
+    if (styles_out)
+        *styles_out = (struct view_styles){0};
     enum view_format fmt = view_detect_format(path, raw, force_render);
     if (fmt == VIEW_FORMAT_RAW) {
         errno = EINVAL;
@@ -519,8 +690,11 @@ int view_render_source(struct source *raw, const char *path, int width,
         errno = EIO;
         return -1;
     }
+    struct view_styles captured = b.styles;
+    b.styles = (struct view_styles){0};
     rbuf_free(&b);
     if (fflush(fp) != 0) {
+        view_styles_free(&captured);
         fclose(fp);
         return -1;
     }
@@ -535,9 +709,14 @@ int view_render_source(struct source *raw, const char *path, int width,
     };
     off_t end = lseek(out->fd, 0, SEEK_END);
     if (end < 0) {
+        view_styles_free(&captured);
         source_close(out);
         return -1;
     }
     out->size = end;
+    if (styles_out)
+        *styles_out = captured;
+    else
+        view_styles_free(&captured);
     return 0;
 }

@@ -27,6 +27,22 @@ printf '# Heading\n\n* item\n' > sample.md
 "$bin" -R --ascii sample.md > md_out
 grep -F 'Heading' md_out >/dev/null
 grep -F '* item' md_out >/dev/null
+# Redirected -R defaults to plain text (no ESC bytes).
+if grep -q "$(printf '\033')" md_out; then
+    exit 1
+fi
+# Explicit --color emits ANSI SGR on rendered stdout.
+"$bin" -R --ascii --color sample.md > md_color
+grep -q "$(printf '\033\[')" md_color
+# --no-color and NO_COLOR=1 suppress ANSI SGR.
+"$bin" -R --ascii --no-color sample.md > md_nocolor
+if grep -q "$(printf '\033')" md_nocolor; then
+    exit 1
+fi
+NO_COLOR=1 "$bin" -R --ascii sample.md > md_envnocolor
+if grep -q "$(printf '\033')" md_envnocolor; then
+    exit 1
+fi
 
 printf 'flowchart TD\nA[One] --> B[Two]\n' > sample.mmd
 "$bin" --render --ascii sample.mmd > mmd_out
