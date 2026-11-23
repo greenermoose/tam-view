@@ -142,6 +142,8 @@ struct pager {
     const char *label;
     const char *message;
     char message_buf[SEARCH_SIZE + 80];
+    char *pending_external;
+    bool external_armed;
     bool waiting;
     bool dirty;
     bool scroll;
@@ -880,6 +882,8 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
     }
     if (!f->render_mode)
         return;
+    if (f->source.spool && !f->source.eof)
+        return;
     if (f->has_rendered && f->rendered_width == p->width)
         return;
     if (f->has_rendered) {
@@ -984,7 +988,7 @@ static int switch_file(struct pager *p, size_t target)
     return 0;
 }
 
-static void push_history(struct pager *p)
+static bool push_history(struct pager *p)
 {
     struct file_entry *cur = &p->files[p->file_index];
     if (p->history_count >= HISTORY_MAX) {
@@ -995,7 +999,7 @@ static void push_history(struct pager *p)
         size_t ncap = p->history_cap ? p->history_cap * 2 : 16;
         struct nav_entry *grown = realloc(p->history, ncap * sizeof(*grown));
         if (!grown)
-            return;
+            return false;
         p->history = grown;
         p->history_cap = ncap;
     }
@@ -1006,6 +1010,7 @@ static void push_history(struct pager *p)
         .h_offset = p->h_offset,
         .render_mode = cur->render_mode
     };
+    return true;
 }
 
 static int jump_to_anchor(struct pager *p, const char *frag, bool record_history)
@@ -1015,13 +1020,14 @@ static int jump_to_anchor(struct pager *p, const char *frag, bool record_history
         p->message = "Anchors require rendered view";
         return 0;
     }
-    char decoded[256];
-    tam_uri_percent_decode(frag, strlen(frag), decoded, sizeof(decoded));
+    const char *decoded = frag;
     const struct view_links *lk = &cur->rendered_links;
     for (size_t i = 0; i < lk->anchor_count; i++) {
         if (strcasecmp(lk->anchors[i].id, decoded) == 0) {
-            if (record_history)
-                push_history(p);
+            if (record_history && !push_history(p)) {
+                p->message = "Out of memory";
+                return 0;
+            }
             save_jump_mark(p);
             struct position target = {.byte = lk->anchors[i].byte};
             if (align(p, target, &p->top) < 0)
@@ -1085,18 +1091,36 @@ static int follow_focused_link(struct pager *p)
         return 0;
     }
     if (kind == TAM_URI_EXTERNAL) {
+        if (!p->pending_external || strcmp(p->pending_external, url) != 0) {
+            free(p->pending_external);
+            p->pending_external = strdup(url);
+            if (!p->pending_external) {
+                p->message = "Out of memory";
+                return 0;
+            }
+            p->external_armed = true;
+            snprintf(p->message_buf, sizeof(p->message_buf),
+                     "Press again to open: %s", url);
+            p->message = p->message_buf;
+            return 0;
+        }
+        free(p->pending_external);
+        p->pending_external = NULL;
         if (tam_uri_open_external(url) < 0) {
             p->message = "Could not open external link";
             return 0;
         }
         char safe[SEARCH_SIZE];
         view_label(safe, sizeof(safe), p->width > 10 ? p->width - 10 : 40, url);
-        snprintf(p->message_buf, sizeof(p->message_buf), "Opened: %s", safe);
+        snprintf(p->message_buf, sizeof(p->message_buf), "Started opener: %s", safe);
         p->message = p->message_buf;
         return 0;
     }
-    if (kind == TAM_URI_ANCHOR)
-        return jump_to_anchor(p, url + 1, true);
+    if (kind == TAM_URI_ANCHOR) {
+        char decoded[256];
+        tam_uri_percent_decode(url + 1, strlen(url + 1), decoded, sizeof(decoded));
+        return jump_to_anchor(p, decoded, true);
+    }
 
     char target_path[4096];
     char frag[256];
@@ -1114,10 +1138,23 @@ static int follow_focused_link(struct pager *p)
     if (target_idx < 0)
         return 0;
 
-    push_history(p);
+    bool history_full = p->history_count >= HISTORY_MAX;
+    struct nav_entry oldest = {0};
+    if (history_full)
+        oldest = p->history[0];
+    if (!push_history(p)) {
+        p->message = "Out of memory";
+        return 0;
+    }
     if (switch_file(p, (size_t)target_idx) < 0) {
         if (p->history_count > 0)
             p->history_count--;
+        if (history_full) {
+            memmove(&p->history[1], &p->history[0],
+                    p->history_count * sizeof(p->history[0]));
+            p->history[0] = oldest;
+            p->history_count++;
+        }
         if ((size_t)target_idx == prev_count && p->file_count > prev_count) {
             if (p->files[target_idx].own_path)
                 free((void *)p->files[target_idx].path);
@@ -1136,9 +1173,10 @@ static int go_back(struct pager *p)
         p->message = "No link history";
         return 0;
     }
-    struct nav_entry e = p->history[--p->history_count];
+    struct nav_entry e = p->history[p->history_count - 1];
     if (e.file_index != p->file_index && switch_file(p, e.file_index) < 0)
         return 0;
+    p->history_count--;
     struct file_entry *cur = &p->files[p->file_index];
     if (cur->render_mode != e.render_mode) {
         cur->render_mode = e.render_mode;
@@ -1920,6 +1958,7 @@ static int handle_key(struct pager *p, tam_key_event_t key)
 
 static int refresh_size(struct pager *p)
 {
+    ssize_t previous_link = p->focused_link;
     if (p->current.valid && output(p, "\r\033[K\r\n") < 0)
         return -1;
     p->current.valid = false;
@@ -1944,6 +1983,18 @@ static int refresh_size(struct pager *p)
     if (align(p, p->attn, &p->attn) < 0)
         return -1;
     catch_link_on_attn(p, 1);
+    const struct view_links *links = active_links(p);
+    off_t start, end;
+    if (links && previous_link >= 0 && (size_t)previous_link < links->count &&
+        row_byte_range(p, p->attn, &start, &end)) {
+        for (size_t i = 0; i < links->span_count; i++) {
+            if (links->spans[i].link_index == (size_t)previous_link &&
+                links->spans[i].start < end && links->spans[i].end > start) {
+                p->focused_link = previous_link;
+                break;
+            }
+        }
+    }
     return 0;
 }
 
@@ -2020,15 +2071,24 @@ static int run(struct pager *p, int wake)
         tam_key_event_t key;
         int ready = tam_key_next(&p->keys, &key);
         if (ready > 0) {
+            p->external_armed = false;
             if (handle_key(p, key) < 0)
                 return -1;
+            if (!p->external_armed) {
+                free(p->pending_external);
+                p->pending_external = NULL;
+            }
             continue;
         }
         if (ready < 0)
             tam_key_init(&p->keys);
 
+        struct file_entry *current_file = &p->files[p->file_index];
+        bool rendering_input = current_file->render_mode &&
+                               current_file->source.spool &&
+                               !current_file->source.eof;
         bool pump = !p->source->eof &&
-                    (p->waiting || job_state == VIEW_WAIT || p->following);
+                    (rendering_input || p->waiting || job_state == VIEW_WAIT || p->following);
         struct pollfd fds[] = {
             {.fd = wake, .events = POLLIN},
             {.fd = p->tty.in_fd, .events = POLLIN},
@@ -2047,8 +2107,15 @@ static int run(struct pager *p, int wake)
             if (tam_key_pending(&p->keys)) {
                 int got_key = tam_key_timeout(&p->keys, &key);
                 tam_key_init(&p->keys);
-                if (got_key > 0 && handle_key(p, key) < 0)
-                    return -1;
+                if (got_key > 0) {
+                    p->external_armed = false;
+                    if (handle_key(p, key) < 0)
+                        return -1;
+                    if (!p->external_armed) {
+                        free(p->pending_external);
+                        p->pending_external = NULL;
+                    }
+                }
             }
             if (p->following && !p->source->spool && p->job == IDLE) {
                 off_t new_size = 0;
@@ -2075,6 +2142,16 @@ static int run(struct pager *p, int wake)
         if (fds[2].revents) {
             if (source_pump(p->source) < 0)
                 return -1;
+            if (rendering_input && current_file->source.eof) {
+                ensure_rendered(p, current_file);
+                p->source = active_source(current_file);
+                p->top = (struct position){0};
+                p->attn = p->top;
+                p->current.valid = false;
+                p->dirty = true;
+                catch_link_on_attn(p, 1);
+                continue;
+            }
             if (p->following) {
                 p->job = GO_END;
             } else if (p->waiting) {
@@ -2202,6 +2279,7 @@ cleanup:;
     free(p.search.line);
     free(p.next.text);
     free(p.history);
+    free(p.pending_external);
     for (size_t i = 0; i < p.file_count; i++) {
         if (p.files[i].has_rendered) {
             source_close(&p.files[i].rendered);

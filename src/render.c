@@ -1,4 +1,7 @@
 #include "render_internal.h"
+
+#include <poll.h>
+#include <fcntl.h>
 #include "view.h"
 
 #include <tam_pager.h>
@@ -78,6 +81,11 @@ void rbuf_clear(struct rbuf *b)
         b->data[0] = '\0';
     b->styles.count = 0;
     view_links_free(&b->links);
+    free(b->anchor_index);
+    free(b->anchor_next);
+    b->anchor_index = NULL;
+    b->anchor_next = NULL;
+    b->anchor_index_cap = b->anchor_next_cap = 0;
 }
 
 void rbuf_free(struct rbuf *b)
@@ -85,6 +93,8 @@ void rbuf_free(struct rbuf *b)
     free(b->data);
     view_styles_free(&b->styles);
     view_links_free(&b->links);
+    free(b->anchor_index);
+    free(b->anchor_next);
     *b = (struct rbuf){0};
 }
 
@@ -320,13 +330,57 @@ void rbuf_add_link(struct rbuf *b, size_t start, size_t end,
     }
 }
 
-static bool anchor_exists(const struct view_links *lk, const char *id)
+static size_t anchor_hash(const char *id)
 {
-    for (size_t i = 0; i < lk->anchor_count; i++) {
-        if (strcasecmp(lk->anchors[i].id, id) == 0)
-            return true;
+    size_t h = 5381;
+    for (; *id; id++)
+        h = h * 33 + (unsigned char)tolower((unsigned char)*id);
+    return h;
+}
+
+static ssize_t anchor_find(struct rbuf *b, const char *id)
+{
+    if (!b->anchor_index_cap)
+        return -1;
+    size_t slot = anchor_hash(id) & (b->anchor_index_cap - 1);
+    while (b->anchor_index[slot]) {
+        size_t index = b->anchor_index[slot] - 1;
+        if (strcasecmp(b->links.anchors[index].id, id) == 0)
+            return (ssize_t)index;
+        slot = (slot + 1) & (b->anchor_index_cap - 1);
     }
-    return false;
+    return -1;
+}
+
+static bool anchor_insert(struct rbuf *b, const char *id, size_t len, size_t byte)
+{
+    size_t count = b->links.anchor_count;
+    if (count == b->anchor_next_cap) {
+        size_t cap = b->anchor_next_cap ? b->anchor_next_cap * 2 : 16;
+        size_t *next = realloc(b->anchor_next, cap * sizeof(*next));
+        if (!next) return false;
+        b->anchor_next = next;
+        b->anchor_next_cap = cap;
+    }
+    if ((count + 1) * 2 >= b->anchor_index_cap) {
+        size_t cap = b->anchor_index_cap ? b->anchor_index_cap * 2 : 32;
+        size_t *index = calloc(cap, sizeof(*index));
+        if (!index) return false;
+        for (size_t i = 0; i < count; i++) {
+            size_t slot = anchor_hash(b->links.anchors[i].id) & (cap - 1);
+            while (index[slot]) slot = (slot + 1) & (cap - 1);
+            index[slot] = i + 1;
+        }
+        free(b->anchor_index);
+        b->anchor_index = index;
+        b->anchor_index_cap = cap;
+    }
+    if (!view_links_add_anchor(&b->links, id, len, (off_t)byte)) return false;
+    size_t slot = anchor_hash(id) & (b->anchor_index_cap - 1);
+    while (b->anchor_index[slot]) slot = (slot + 1) & (b->anchor_index_cap - 1);
+    b->anchor_index[slot] = count + 1;
+    b->anchor_next[count] = 1;
+    return true;
 }
 
 void rbuf_add_anchor(struct rbuf *b, const char *id, size_t id_len,
@@ -339,9 +393,9 @@ void rbuf_add_anchor(struct rbuf *b, const char *id, size_t id_len,
         id_len = sizeof(tmp) - 1;
     memcpy(tmp, id, id_len);
     tmp[id_len] = '\0';
-    if (anchor_exists(&b->links, tmp))
+    if (anchor_find(b, tmp) >= 0)
         return;
-    if (!view_links_add_anchor(&b->links, tmp, id_len, (off_t)byte))
+    if (!anchor_insert(b, tmp, id_len, byte))
         b->oom = true;
 }
 
@@ -354,18 +408,20 @@ void rbuf_add_heading_anchor(struct rbuf *b, const char *text, size_t len,
     size_t blen = tam_uri_slugify(text, len, base, sizeof(base));
     if (blen == 0)
         return;
-    if (!anchor_exists(&b->links, base)) {
-        if (!view_links_add_anchor(&b->links, base, blen, (off_t)byte))
+    ssize_t base_index = anchor_find(b, base);
+    if (base_index < 0) {
+        if (!anchor_insert(b, base, blen, byte))
             b->oom = true;
         return;
     }
-    for (unsigned n = 1; n < 1000; n++) {
+    for (size_t n = b->anchor_next[base_index]; ; n++) {
         char cand[256];
-        int clen = snprintf(cand, sizeof(cand), "%s-%u", base, n);
+        int clen = snprintf(cand, sizeof(cand), "%s-%zu", base, n);
         if (clen <= 0 || (size_t)clen >= sizeof(cand))
             break;
-        if (!anchor_exists(&b->links, cand)) {
-            if (!view_links_add_anchor(&b->links, cand, (size_t)clen, (off_t)byte))
+        if (anchor_find(b, cand) < 0) {
+            b->anchor_next[base_index] = n + 1;
+            if (!anchor_insert(b, cand, (size_t)clen, byte))
                 b->oom = true;
             return;
         }
@@ -760,11 +816,18 @@ enum view_format view_detect_format(const char *path, struct source *s,
 static int read_all_source(struct source *s, char **out_buf, size_t *out_len)
 {
     while (!s->eof) {
+        struct pollfd fd = {.fd = s->input, .events = POLLIN};
+        int ready;
+        do {
+            ready = poll(&fd, 1, -1);
+        } while (ready < 0 && errno == EINTR);
+        if (ready < 0)
+            return -1;
         if (source_pump(s) < 0)
             return -1;
-        if (!s->eof && s->spool) {
-            // Avoid spinning if a slow pipe has no more bytes yet; read what's available.
-            break;
+        if (s->size > RENDER_MAX_INPUT) {
+            errno = EFBIG;
+            return -1;
         }
     }
     off_t sz = source_size(s);
@@ -781,11 +844,11 @@ static int read_all_source(struct source *s, char **out_buf, size_t *out_len)
     for (size_t i = 0; i < len; i++) {
         int b = source_byte(s, (off_t)i);
         if (b < 0) {
-            free(buf);
             if (b == VIEW_EOF) {
                 len = i;
                 break;
             }
+            free(buf);
             errno = EIO;
             return -1;
         }
@@ -809,16 +872,16 @@ int view_render_source(struct source *raw, const char *path, int width,
         *links_out = (struct view_links){0};
     if (fmt_out)
         *fmt_out = VIEW_FORMAT_RAW;
-    enum view_format fmt = view_detect_format(path, raw, force_render);
-    if (fmt == VIEW_FORMAT_RAW) {
-        errno = EINVAL;
-        return -1;
-    }
-
     char *src = NULL;
     size_t len = 0;
     if (read_all_source(raw, &src, &len) < 0)
         return -1;
+    enum view_format fmt = view_detect_format(path, raw, force_render);
+    if (fmt == VIEW_FORMAT_RAW) {
+        free(src);
+        errno = EINVAL;
+        return -1;
+    }
 
     struct rbuf b;
     rbuf_init(&b);
@@ -840,6 +903,13 @@ int view_render_source(struct source *raw, const char *path, int width,
     FILE *fp = tmpfile();
     if (!fp) {
         rbuf_free(&b);
+        return -1;
+    }
+    if (fcntl(fileno(fp), F_SETFD, FD_CLOEXEC) < 0) {
+        int err = errno;
+        fclose(fp);
+        rbuf_free(&b);
+        errno = err;
         return -1;
     }
     if (b.len > 0 && fwrite(b.data, 1, b.len, fp) != b.len) {

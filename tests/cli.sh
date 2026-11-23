@@ -64,6 +64,28 @@ printf '<p>&ldquo;hi&rdquo;</p>\n' > sample.html
 TERM=dumb "$bin" -R --ascii sample.html > html_out
 grep -F '"hi"' html_out >/dev/null
 
+python3 - "$bin" <<'PY'
+import subprocess
+import sys
+import time
+
+viewer = subprocess.Popen([sys.argv[1], '-R', '--ascii'],
+                          stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+assert viewer.stdin is not None and viewer.stdout is not None
+viewer.stdin.write(b'# First\n\n' + b'line\n' * 14000)
+viewer.stdin.flush()
+time.sleep(0.1)
+viewer.stdin.write(b'\nLast paragraph\n')
+viewer.stdin.close()
+output = viewer.stdout.read()
+assert viewer.wait() == 0 and b'Last paragraph' in output
+
+html = subprocess.run([sys.argv[1], '-R', '--ascii'],
+                      input=b'<p>HTML sentinel</p>', capture_output=True,
+                      check=True).stdout
+assert b'HTML sentinel' in html and b'<p>' not in html
+PY
+
 if "$bin" --invalid 2> error || "$bin" absent 2> error ||
    "$bin" . 2> error || "$bin" one two 2> error; then
     exit 1

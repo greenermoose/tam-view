@@ -14,6 +14,11 @@ RENDER_OBJECTS = $(addprefix $(BUILD)/,render.o render_md.o render_html.o render
 
 all: $(BUILD)/tam-view
 
+libtam-check:
+	@printf '#include <tam.h>\n#if TAM_VERSION_MAJOR == 0 && (TAM_VERSION_MINOR < 9 || (TAM_VERSION_MINOR == 9 && TAM_VERSION_PATCH < 1))\n#error libtam 0.9.1 or later required\n#endif\n#include <tam_pager.h>\n' | $(CC) $(CPPFLAGS) -x c -fsyntax-only - || { echo 'tam-view requires libtam 0.9.1 or later' >&2; exit 1; }
+
+$(OBJECTS): | libtam-check
+
 $(BUILD)/tam-view: $(OBJECTS) $(LIBTAM)
 	$(CC) $(LDFLAGS) -o $@ $(OBJECTS) $(LIBTAM)
 
@@ -30,7 +35,8 @@ $(BUILD)/test-layout: tests/test-layout.c $(BUILD)/layout.o $(BUILD)/source.o $(
 $(BUILD)/test-render: tests/test-render.c $(RENDER_OBJECTS) $(BUILD)/layout.o $(BUILD)/source.o $(LIBTAM)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
-$(BUILD)/test-pty: tests/test-pty.c
+$(BUILD)/test-pty: CPPFLAGS += -DVIEW_VERSION='"$(VERSION)"'
+$(BUILD)/test-pty: tests/test-pty.c VERSION
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 test: $(BUILD)/tam-view $(BUILD)/test-layout $(BUILD)/test-render $(BUILD)/test-pty
@@ -53,6 +59,6 @@ uninstall:
 clean:
 	rm -rf build
 
-.PHONY: all test sanitize install uninstall clean
+.PHONY: all test sanitize install uninstall clean libtam-check
 
 -include $(OBJECTS:.o=.d)

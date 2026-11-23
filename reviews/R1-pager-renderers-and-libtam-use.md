@@ -19,6 +19,12 @@ on a single key press, and a failed open is reported as success (B3).
 Of tam's six bugs, B6 does not recur as memory corruption here, and B4 has
 a milder analogue.
 
+## Follow-up
+
+The findings were checked and addressed in 0.4.1. The opener reports
+that xdg-open started, while later failures belong to that program.
+The fix requires libtam 0.9.1. Verification is recorded in W6.
+
 ## Findings
 
 ### 1. A short read frees the render buffer, then returns it (critical)

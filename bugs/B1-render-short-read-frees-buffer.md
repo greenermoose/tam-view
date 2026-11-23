@@ -1,9 +1,9 @@
 # B1 — A short read frees the render buffer, then returns it
 
-- **Status:** Confirmed
+- **Status:** Fix available
 - **Severity:** critical
 - **Affected versions:** Confirmed in 0.4.0
-- **Fixed in:** Open
+- **Fixed in:** 0.4.1 (source)
 - **Reported:** 2026-11-22, agy (Claude Opus 5.5)
 - **Found by:** [R1](../reviews/R1-pager-renderers-and-libtam-use.md)
 

@@ -2,9 +2,12 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-22, with W5
+Updated: 2026-11-23, with W6
 
 STATE
+
+  0.4.1 on dev fixes R1, using libtam 0.9.1. W6 records checks.
+  The installed development viewer remains 0.4.0.
 
   0.4.0 on dev adds hyperlink navigation, a mode-aware attention line
   (for rendered Markdown and HTML; plain text / raw mode keeps direct
@@ -19,7 +22,7 @@ STATE
 NEXT
 
   1. Install/package for Tamlinux when Fred calls for the next stage.
-  2. Later optional slices: R1 code review & man page, or additional
+  2. Later optional slices: man page, or additional
      Mermaid diagram types (sequence/state/subgraphs).
 
 WAITING FOR FRED

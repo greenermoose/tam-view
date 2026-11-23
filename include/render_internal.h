@@ -14,6 +14,10 @@ struct rbuf {
     size_t cap;
     struct view_styles styles;
     struct view_links links;
+    size_t *anchor_index;
+    size_t anchor_index_cap;
+    size_t *anchor_next;
+    size_t anchor_next_cap;
     bool oom;
 };
 

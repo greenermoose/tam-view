@@ -52,7 +52,10 @@ static char *render_str_all(enum view_format fmt, const char *input,
     } else {
         view_links_free(&b.links);
     }
-    return b.data ? b.data : strdup("");
+    char *result = b.data ? b.data : strdup("");
+    b.data = NULL;
+    rbuf_free(&b);
+    return result;
 }
 
 static char *render_str_styles(enum view_format fmt, const char *input,
@@ -95,6 +98,37 @@ static void test_detect(void)
     assert(view_detect_format("-", &s, false) == VIEW_FORMAT_HTML);
     source_close(&s);
     fclose(fp);
+}
+
+static void test_short_source(void)
+{
+    FILE *fp = tmpfile();
+    assert(fp);
+    assert(fputs("# short\n", fp) >= 0 && fflush(fp) == 0);
+    struct source source = {.fd = fileno(fp), .spool = fp, .eof = true,
+                            .size = 32, .block = -1};
+    struct source out;
+    assert(view_render_source(&source, "test.md", 80, true, true,
+                              &out, NULL, NULL, NULL) == 0);
+    source_close(&out);
+    source_close(&source);
+}
+
+static void test_invalid_entities_and_duplicate_headings(void)
+{
+    char *html = render_str(VIEW_FORMAT_HTML,
+        "<p>&#4294967361; &#0; &#x110000; &#xD800; &#xZZ;</p>",
+        80, true);
+    assert(strstr(html, "? ? ? ? &#xZZ;"));
+    free(html);
+
+    struct rbuf b;
+    rbuf_init(&b);
+    for (size_t i = 0; i < 3000; i++)
+        rbuf_add_heading_anchor(&b, "Same", 4, i);
+    assert(!b.oom && b.links.anchor_count == 3000);
+    assert(strcmp(b.links.anchors[2999].id, "same-2999") == 0);
+    rbuf_free(&b);
 }
 
 static void test_markdown(void)
@@ -265,6 +299,8 @@ static void test_links_and_anchors(void)
 
 int main(void)
 {
+    test_short_source();
+    test_invalid_entities_and_duplicate_headings();
     assert(setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, ""));
     test_detect();
     test_markdown();

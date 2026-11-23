@@ -461,7 +461,7 @@ int main(int argc, char **argv)
     size(&t, 5, 40);
     expect(&t, 4, "/tmp/tam-view-test-");
     CHECK(strstr(t.screen.cell[4], "1-4/8") != NULL);
-    CHECK(strstr(t.screen.cell[4], "v0.4.0") != NULL);
+    CHECK(strstr(t.screen.cell[4], "v" VIEW_VERSION) != NULL);
     CHECK(contains(&t, 0, "one") && contains(&t, 3, "four"));
     CHECK(kill(t.child, SIGTERM) == 0);
     finish(&t, 128 + SIGTERM, 4);
@@ -632,12 +632,12 @@ int main(int argc, char **argv)
         expect(&t, 0, "Top");
         // Footer shows L1 and version v0.4.0.
         for (int i = 0; i < 60; i++) {
-            if (strstr(t.screen.cell[5], "L1 ") && strstr(t.screen.cell[5], "v0.4.0"))
+            if (strstr(t.screen.cell[5], "L1 ") && strstr(t.screen.cell[5], "v" VIEW_VERSION))
                 break;
             drain(&t, 50);
         }
         CHECK(strstr(t.screen.cell[5], "L1 ") != NULL);
-        CHECK(strstr(t.screen.cell[5], "v0.4.0") != NULL);
+        CHECK(strstr(t.screen.cell[5], "v" VIEW_VERSION) != NULL);
         CHECK(t.screen.osc8_open_count > 0);
         CHECK(t.screen.osc8_open_count == t.screen.osc8_close_count);
 
@@ -653,6 +653,8 @@ int main(int argc, char **argv)
         // Right arrow follows first link on row ("other.html#sec") and lands on Section Two (L6).
         send_key(&t, "\033[C");
         expect(&t, 1, "Section Two");
+        for (int i = 0; i < 60 && !strstr(t.screen.cell[5], "L6 "); i++)
+            drain(&t, 50);
         CHECK(strstr(t.screen.cell[5], "L6 ") != NULL);
 
         // Left arrow returns to index.md via history.
@@ -662,7 +664,9 @@ int main(int argc, char **argv)
         // Down steps to second link on row ("https://tamlinux.org"), Right invokes mock xdg-open.
         send_key(&t, "\033[B");
         send_key(&t, "\033[C");
-        expect(&t, 5, "Opened: https://tamlinux.org");
+        expect(&t, 5, "Press again to open:");
+        send_key(&t, "\033[C");
+        expect(&t, 5, "Started opener:");
 
         // Verify mock xdg-open received exact URL.
         bool logged = false;
@@ -695,6 +699,32 @@ int main(int argc, char **argv)
         rmdir(dir);
     }
 
+    {
+        int input[2];
+        CHECK(pipe(input) == 0);
+        t = start_args(argv[1], "-R", NULL, input[0], input[1]);
+        close(input[0]);
+        CHECK(write(input[1], "# First\n", 8) == 8);
+        expect(&t, 0, "# First");
+        send_key(&t, "q");
+        finish(&t, 0, 1);
+        close(input[1]);
+        close_terminal(&t);
+
+        CHECK(pipe(input) == 0);
+        t = start_args(argv[1], "-R", NULL, input[0], input[1]);
+        close(input[0]);
+        CHECK(write(input[1], "# First\n", 8) == 8);
+        expect(&t, 0, "# First");
+        CHECK(write(input[1], "\nLast paragraph\n", 16) == 16);
+        close(input[1]);
+        expect(&t, 0, "First");
+        send_key(&t, "G");
+        expect(&t, 2, "Last paragraph");
+        send_key(&t, "q");
+        finish(&t, 0, 3);
+        close_terminal(&t);
+    }
     CHECK(unlink(path) == 0);
     puts("PTY: ok");
     return 0;

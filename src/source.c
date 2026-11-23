@@ -1,6 +1,7 @@
 #include "view.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -28,6 +29,13 @@ int source_open(struct source *s, int input)
     if (!s->spool)
         return -1;
     s->fd = fileno(s->spool);
+    if (fcntl(s->fd, F_SETFD, FD_CLOEXEC) < 0) {
+        int err = errno;
+        fclose(s->spool);
+        s->spool = NULL;
+        errno = err;
+        return -1;
+    }
     return 0;
 }
 

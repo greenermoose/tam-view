@@ -26,26 +26,33 @@ static void decode_entity(struct rbuf *b, const char *s, size_t len,
 
     if (elen > 0 && ent[0] == '#') {
         uint32_t cp = 0;
+        bool valid = true;
         if (elen > 1 && (ent[1] == 'x' || ent[1] == 'X')) {
             for (size_t k = 2; k < elen; k++) {
                 char c = ent[k];
                 if (!isxdigit((unsigned char)c)) {
-                    cp = 0;
+                    valid = false;
                     break;
                 }
-                cp = cp * 16 + (uint32_t)(isdigit((unsigned char)c)
-                     ? c - '0' : tolower((unsigned char)c) - 'a' + 10);
+                if (cp <= 0x10ffff)
+                    cp = cp * 16 + (uint32_t)(isdigit((unsigned char)c)
+                         ? c - '0' : tolower((unsigned char)c) - 'a' + 10);
             }
         } else {
             for (size_t k = 1; k < elen; k++) {
                 if (!isdigit((unsigned char)ent[k])) {
-                    cp = 0;
+                    valid = false;
                     break;
                 }
-                cp = cp * 10 + (uint32_t)(ent[k] - '0');
+                if (cp <= 0x10ffff)
+                    cp = cp * 10 + (uint32_t)(ent[k] - '0');
             }
         }
-        if (cp > 0 && cp <= 0x10ffff) {
+        if (valid && elen > 1 && (isdigit((unsigned char)ent[1]) ||
+            ((ent[1] == 'x' || ent[1] == 'X') && elen > 2 &&
+             isxdigit((unsigned char)ent[2])))) {
+            if (cp == 0 || cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
+                cp = 0xfffd;
             if (ascii && cp >= 0x80) {
                 rbuf_putc(b, cp == 0xa0 ? ' ' : '?');
             } else {

@@ -1,0 +1,26 @@
+W6 REVIEW FIXES
+
+Date: 2026-11-23
+AI harness: Codex CLI 0.171.0
+AI model: gpt-6.2-sol, gpt-6.1-terra
+
+GUIDANCE
+
+  Fred: "Take a look at the review R1 of tam-view. Do an independent
+  analysis, then fix all tam-view bugs that are real."
+
+DONE
+
+  - Fixed R1 findings and corrected format detection for piped HTML.
+  - Interactive streams remain usable until EOF, then render in full.
+  - Verified with the sanitizer, PTY, renderer, layout and CLI suites.
+  - External opener now reports successful dispatch, not browser outcome.
+
+FAILED
+
+  - LeakSanitizer inside the sandbox could not inspect its processes.
+    The outside-sandbox run exposed and verified a test-helper leak fix.
+
+HANDOFF
+
+  - 0.4.1 needs libtam 0.9.1. Neither is installed by this session.

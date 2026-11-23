@@ -11,7 +11,7 @@ Follows the tam-idol 1.1.0 standard.
 
 BUILD AND TRY
 
-  Needs a C11 compiler, Make, and the core libtam.a plus its headers.
+  Needs a C11 compiler, Make, and libtam 0.9.1 or later.
   LIBTAM_PREFIX defaults to $HOME/.local. The binary links libc and
   the static libtam archive.
 
@@ -38,6 +38,7 @@ KEYS
   b, Page Up           Previous page
   d, u                 Half page down or up
   Right, Enter, o      Follow highlighted link (Right scrolls if no link)
+                       External links require a second press.
   Left, Backspace      Return in link history (Left scrolls if shifted)
   Tab, Shift-Tab       Jump to next / previous link in document
   Shift-Left, -Right   Scroll horizontally
