@@ -36,7 +36,7 @@ $(BUILD)/test-render: tests/test-render.c $(RENDER_OBJECTS) $(BUILD)/layout.o $(
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $^
 
 $(BUILD)/test-pty: CPPFLAGS += -DVIEW_VERSION='"$(VERSION)"'
-$(BUILD)/test-pty: tests/test-pty.c VERSION
+$(BUILD)/test-pty: tests/test-pty.c VERSION | libtam-check
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LDFLAGS) -o $@ $<
 
 test: $(BUILD)/tam-view $(BUILD)/test-layout $(BUILD)/test-render $(BUILD)/test-pty

@@ -777,6 +777,16 @@ static enum view_format sniff_content(const char *buf, size_t len)
 static int read_source_prefix(struct source *s, char *buf, size_t cap,
                               size_t *out_len)
 {
+    while (s->spool && !s->eof && s->size < (off_t)cap) {
+        struct pollfd fd = {.fd = s->input, .events = POLLIN};
+        int ready = poll(&fd, 1, 0);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready <= 0)
+            break;
+        if (source_pump(s) < 0)
+            return -1;
+    }
     size_t n = 0;
     while (n < cap) {
         int b = source_byte(s, (off_t)n);
@@ -829,6 +839,10 @@ static int read_all_source(struct source *s, char **out_buf, size_t *out_len)
             errno = EFBIG;
             return -1;
         }
+    }
+    if (!s->spool) {
+        s->block = -1;
+        s->used = 0;
     }
     off_t sz = source_size(s);
     if (sz < 0)

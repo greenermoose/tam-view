@@ -1,20 +1,26 @@
 W6 REVIEW FIXES
 
 Date: 2026-11-23
-AI harness: Codex CLI 0.171.0
-AI model: gpt-6.2-sol, gpt-6.1-terra
+AI harness: Codex CLI 0.171.0, Antigravity CLI 1.5.15
+AI model: gpt-6.2-sol, gpt-6.1-terra, Gemini 4 Argon (Medium)
 
 GUIDANCE
 
-  Fred: "Take a look at the review R1 of tam-view. Do an independent
-  analysis, then fix all tam-view bugs that are real."
+  Fred: "Take a look at review R1 of tam-view and the work codex started.
+  Independently evaluate the bugs found and fix all of them that are real.
+  Take over any work claims that codex still hold."
 
 DONE
 
-  - Fixed R1 findings and corrected format detection for piped HTML.
-  - Interactive streams remain usable until EOF, then render in full.
+  - Fixed all 11 R1 findings, invalidated regular-file block cache on
+    re-render so shrinking files re-read from disk (B1), and allowed
+    long numeric HTML character references to decode properly.
+  - Incremental piped rendering in interactive mode renders arriving
+    chunks without raw markup flashes or scroll resets, waits for pipe
+    EOF on G, and auto-detects piped HTML and Mermaid (B2).
+  - External opener requires two-press confirmation and reports dispatch
+    errors via libtam 0.9.1 (B3).
   - Verified with the sanitizer, PTY, renderer, layout and CLI suites.
-  - External opener now reports successful dispatch, not browser outcome.
 
 FAILED
 
@@ -23,4 +29,4 @@ FAILED
 
 HANDOFF
 
-  - 0.4.1 needs libtam 0.9.1. Neither is installed by this session.
+  - Dev builds of libtam 0.9.1 and tam-view 0.4.1 installed to ~/.local.

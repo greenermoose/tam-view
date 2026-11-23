@@ -12,8 +12,9 @@
 static void decode_entity(struct rbuf *b, const char *s, size_t len,
                           size_t *consumed, bool ascii)
 {
+    size_t max_scan = (len > 1 && s[1] == '#') ? 128 : 16;
     size_t i = 1;
-    while (i < len && i < 16 && s[i] != ';' && !isspace((unsigned char)s[i]))
+    while (i < len && i < max_scan && s[i] != ';' && !isspace((unsigned char)s[i]))
         i++;
     if (i >= len || s[i] != ';') {
         rbuf_putc(b, '&');

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static char *render_str_all(enum view_format fmt, const char *input,
                             int width, bool ascii,
@@ -112,15 +113,49 @@ static void test_short_source(void)
                               &out, NULL, NULL, NULL) == 0);
     source_close(&out);
     source_close(&source);
+
+    // Regular file that caches block 0 and then shrinks on disk before re-render.
+    FILE *reg = tmpfile();
+    assert(reg);
+    assert(fputs("# Heading\n\nFirst paragraph.\n\nSecond paragraph.\n", reg) >= 0 &&
+           fflush(reg) == 0);
+    rewind(reg);
+    struct source reg_src;
+    assert(source_open(&reg_src, fileno(reg)) == 0);
+    assert(reg_src.spool == NULL);
+    assert(view_render_source(&reg_src, "doc.md", 80, true, true,
+                              &out, NULL, NULL, NULL) == 0);
+    source_close(&out);
+    assert(ftruncate(fileno(reg), 9) == 0);
+    assert(view_render_source(&reg_src, "doc.md", 80, true, true,
+                              &out, NULL, NULL, NULL) == 0);
+    char row[128];
+    struct position pos = {0}, next;
+    assert(view_row(&out, pos, 80, row, &next) == VIEW_ROW);
+    assert(strcmp(row, "Heading") == 0);
+    pos = next;
+    assert(view_row(&out, pos, 80, row, &next) == VIEW_ROW);
+    pos = next;
+    assert(view_row(&out, pos, 80, row, &next) == VIEW_EOF);
+    source_close(&out);
+    source_close(&reg_src);
+    fclose(reg);
 }
 
 static void test_invalid_entities_and_duplicate_headings(void)
 {
     char *html = render_str(VIEW_FORMAT_HTML,
-        "<p>&#4294967361; &#0; &#x110000; &#xD800; &#xZZ;</p>",
+        "<p>&#4294967361; &#0; &#x110000; &#xD800; &#99999999999999999; &#0000000000000065; &#xZZ;</p>",
         80, true);
-    assert(strstr(html, "? ? ? ? &#xZZ;"));
+    assert(strstr(html, "? ? ? ? ? A &#xZZ;"));
     free(html);
+
+    char *html_utf8 = render_str(VIEW_FORMAT_HTML,
+        "<p>&#4294967361; &#0; &#x110000; &#xD800; &#99999999999999999; &#0000000000000065; &#xZZ;</p>",
+        80, false);
+    assert(strstr(html_utf8,
+        "\xef\xbf\xbd \xef\xbf\xbd \xef\xbf\xbd \xef\xbf\xbd \xef\xbf\xbd A &#xZZ;"));
+    free(html_utf8);
 
     struct rbuf b;
     rbuf_init(&b);

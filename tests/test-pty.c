@@ -600,7 +600,7 @@ int main(int argc, char **argv)
         CHECK(mfd >= 0);
         const char *md_doc =
             "# Top\n\n"
-            "Go [Local](other.html#sec) or [Ext](https://tamlinux.org)\n\n"
+            "Go [A](other.html#s%25202) [B](http://x.org) [C](no.md)\n\n"
             "Jump [Target](#target)\n\n"
             "## Target\n\n"
             "Reached target.\n";
@@ -611,7 +611,7 @@ int main(int argc, char **argv)
         CHECK(hfd >= 0);
         const char *html_doc =
             "<html><body><h1>Other Page</h1><p>First</p>"
-            "<h2 id=\"sec\">Section Two</h2><p>Body</p></body></html>";
+            "<h2 id=\"s%202\">Section Two <a href=\"no.html\">Bad</a></h2><p>Body</p></body></html>";
         CHECK(write(hfd, html_doc, strlen(html_doc)) == (ssize_t)strlen(html_doc));
         CHECK(close(hfd) == 0);
 
@@ -628,7 +628,7 @@ int main(int argc, char **argv)
         CHECK(setenv("PATH", new_path, 1) == 0);
 
         t = start_env(argv[1], "--ascii", md_path, -1, -1, "xterm-256color");
-        size(&t, 6, 60);
+        size(&t, 6, 54);
         expect(&t, 0, "Top");
         // Footer shows L1 and version v0.4.0.
         for (int i = 0; i < 60; i++) {
@@ -641,7 +641,7 @@ int main(int argc, char **argv)
         CHECK(t.screen.osc8_open_count > 0);
         CHECK(t.screen.osc8_open_count == t.screen.osc8_close_count);
 
-        // Move attention line down to row 3 ("Go Local (other.html#sec) or Ext (...)").
+        // Move attention line down to row 3 ("Go Local (other.html#sec%25202) or Ext (...)").
         send_key(&t, "\033[B\033[B\033[B");
         for (int i = 0; i < 60; i++) {
             if (strstr(t.screen.cell[5], "L4 "))
@@ -650,23 +650,41 @@ int main(int argc, char **argv)
         }
         CHECK(strstr(t.screen.cell[5], "L4 ") != NULL);
 
-        // Right arrow follows first link on row ("other.html#sec") and lands on Section Two (L6).
+        // Right arrow follows first link on row ("other.html#s%25202") and lands on Section Two (L6).
         send_key(&t, "\033[C");
         expect(&t, 1, "Section Two");
         for (int i = 0; i < 60 && !strstr(t.screen.cell[5], "L6 "); i++)
             drain(&t, 50);
         CHECK(strstr(t.screen.cell[5], "L6 ") != NULL);
 
-        // Left arrow returns to index.md via history.
+        // Following a broken link ("no.html") from other.html fails and rolls back its history push,
+        // so Left still returns to index.md (Finding 7).
+        send_key(&t, "\033[C");
+        expect(&t, 5, "/tmp/tam-view-links-");
         send_key(&t, "\033[D");
         expect(&t, 0, "Top");
 
-        // Down steps to second link on row ("https://tamlinux.org"), Right invokes mock xdg-open.
+        // Down steps to second link on row ("http://x.org").
+        // Resize preserves focus on the second link on the row (Finding 8).
+        for (int i = 0; i < 60 && !strstr(t.screen.cell[5], "L4 "); i++)
+            drain(&t, 50);
         send_key(&t, "\033[B");
+        drain(&t, 50);
+        size(&t, 6, 60);
+        for (int i = 0; i < 60 && t.screen.cell[5][54] != 'v'; i++)
+            drain(&t, 50);
+        CHECK(t.screen.cell[5][54] == 'v');
+
+        // First press arms external link; any other key cancels it; two presses invoke xdg-open (B3).
         send_key(&t, "\033[C");
-        expect(&t, 5, "Press again to open:");
+        expect(&t, 5, "Press again to open: http://x.org");
+        send_key(&t, "\033");
+        for (int i = 0; i < 60 && !strstr(t.screen.cell[5], "L4 "); i++)
+            drain(&t, 50);
         send_key(&t, "\033[C");
-        expect(&t, 5, "Started opener:");
+        expect(&t, 5, "Press again to open: http://x.org");
+        send_key(&t, "\033[C");
+        expect(&t, 5, "Started opener: http://x.org");
 
         // Verify mock xdg-open received exact URL.
         bool logged = false;
@@ -675,7 +693,7 @@ int main(int argc, char **argv)
             if (lf) {
                 char line[128] = {0};
                 if (fgets(line, sizeof(line), lf) &&
-                    strncmp(line, "https://tamlinux.org", 20) == 0) {
+                    strncmp(line, "http://x.org", 12) == 0) {
                     logged = true;
                 }
                 fclose(lf);
@@ -685,6 +703,11 @@ int main(int argc, char **argv)
             drain(&t, 25);
         }
         CHECK(logged);
+
+        // Step to third link on row ("no.md"); failed open reports error (Finding 7).
+        send_key(&t, "\033[B");
+        send_key(&t, "\033[C");
+        expect(&t, 5, "/tmp/tam-view-links-");
 
         send_key(&t, "q");
         finish(&t, 0, 5);
@@ -705,24 +728,61 @@ int main(int argc, char **argv)
         t = start_args(argv[1], "-R", NULL, input[0], input[1]);
         close(input[0]);
         CHECK(write(input[1], "# First\n", 8) == 8);
-        expect(&t, 0, "# First");
+        expect(&t, 0, "First");
+        expect(&t, 1, "=====");
+        CHECK(!contains(&t, 0, "# First"));
         send_key(&t, "q");
-        finish(&t, 0, 1);
+        finish(&t, 0, 2);
         close(input[1]);
         close_terminal(&t);
 
+        // B2: >64 KiB Markdown document piped in two halves separated by a pause.
         CHECK(pipe(input) == 0);
         t = start_args(argv[1], "-R", NULL, input[0], input[1]);
         close(input[0]);
-        CHECK(write(input[1], "# First\n", 8) == 8);
-        expect(&t, 0, "# First");
-        CHECK(write(input[1], "\nLast paragraph\n", 16) == 16);
+        for (int p = 1; p <= 100; p++) {
+            char para[512];
+            int n = snprintf(para, sizeof(para),
+                "Paragraph %d: lorem ipsum dolor sit amet, consectetur adipiscing elit. "
+                "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+                "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris "
+                "nisi ut aliquip ex ea commodo consequat duis aute irure dolor in "
+                "reprehenderit in voluptate velit esse cillum dolore eu fugiat.\n\n",
+                p);
+            CHECK(write(input[1], para, (size_t)n) == n);
+        }
+        expect(&t, 0, "Paragraph 1:");
+        for (int p = 101; p <= 199; p++) {
+            char para[512];
+            int n = snprintf(para, sizeof(para),
+                "Paragraph %d: lorem ipsum dolor sit amet, consectetur adipiscing elit. "
+                "Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. "
+                "Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris "
+                "nisi ut aliquip ex ea commodo consequat duis aute irure dolor in "
+                "reprehenderit in voluptate velit esse cillum dolore eu fugiat.\n\n",
+                p);
+            CHECK(write(input[1], para, (size_t)n) == n);
+        }
+        const char *last_para = "Paragraph 200 final line.\n";
+        CHECK(write(input[1], last_para, strlen(last_para)) == (ssize_t)strlen(last_para));
         close(input[1]);
-        expect(&t, 0, "First");
         send_key(&t, "G");
-        expect(&t, 2, "Last paragraph");
+        expect(&t, 2, "Paragraph 200 final line.");
         send_key(&t, "q");
         finish(&t, 0, 3);
+        close_terminal(&t);
+
+        // Auto-detect piped HTML in interactive mode without -R.
+        CHECK(pipe(input) == 0);
+        t = start_args(argv[1], "--ascii", NULL, input[0], input[1]);
+        close(input[0]);
+        const char *piped_html = "<!DOCTYPE html><html><body><h1>Piped HTML</h1></body></html>\n";
+        CHECK(write(input[1], piped_html, strlen(piped_html)) == (ssize_t)strlen(piped_html));
+        close(input[1]);
+        expect(&t, 0, "Piped HTML");
+        expect(&t, 1, "==========");
+        send_key(&t, "q");
+        finish(&t, 0, 2);
         close_terminal(&t);
     }
     CHECK(unlink(path) == 0);

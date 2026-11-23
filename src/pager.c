@@ -72,6 +72,7 @@ struct file_entry {
     enum view_format rendered_format;
     bool has_rendered;
     int rendered_width;
+    off_t rendered_size;
     bool render_mode;
     bool force_render;
     bool render_inited;
@@ -379,7 +380,7 @@ static void ensure_row_index(struct pager *p)
         return;
     }
     cur->row_index_valid = false;
-    if (!p->source->eof)
+    if (!p->source->eof || !cur->source.eof)
         return;
     off_t sz = source_size(p->source);
     if (sz < 0 || sz > ROW_INDEX_MAX_BYTES)
@@ -522,6 +523,22 @@ static void catch_link_on_attn(struct pager *p, int dir)
         return;
     }
     p->focused_link = find_link_on_row(p, p->attn, dir < 0);
+}
+
+static void restore_link_on_attn(struct pager *p, ssize_t previous_link)
+{
+    const struct view_links *links = active_links(p);
+    off_t start, end;
+    if (links && previous_link >= 0 && (size_t)previous_link < links->count &&
+        row_byte_range(p, p->attn, &start, &end)) {
+        for (size_t i = 0; i < links->span_count; i++) {
+            if (links->spans[i].link_index == (size_t)previous_link &&
+                links->spans[i].start < end && links->spans[i].end > start) {
+                p->focused_link = previous_link;
+                break;
+            }
+        }
+    }
 }
 
 static const char *const HELP_LINES[] = {
@@ -864,17 +881,42 @@ static struct source *active_source(struct file_entry *f)
     return (f->render_mode && f->has_rendered) ? &f->rendered : &f->source;
 }
 
+static int pump_ready_source(struct source *s)
+{
+    while (s->spool && !s->eof) {
+        struct pollfd fd = {.fd = s->input, .events = POLLIN};
+        int ready = poll(&fd, 1, 0);
+        if (ready < 0 && errno == EINTR)
+            continue;
+        if (ready < 0)
+            return -1;
+        if (ready == 0)
+            break;
+        if (source_pump(s) < 0)
+            return -1;
+    }
+    return 0;
+}
+
 static void ensure_rendered(struct pager *p, struct file_entry *f)
 {
+    if (f->source.spool && !f->source.eof) {
+        if (pump_ready_source(&f->source) < 0)
+            return;
+    }
     if (!f->render_inited) {
-        f->render_inited = true;
         if (p->opts.mode == VIEW_MODE_RAW) {
+            f->render_inited = true;
             f->render_mode = false;
             f->force_render = false;
         } else if (p->opts.mode == VIEW_MODE_RENDER) {
+            f->render_inited = true;
             f->render_mode = true;
             f->force_render = true;
         } else {
+            if (f->source.spool && f->source.size == 0 && !f->source.eof)
+                return;
+            f->render_inited = true;
             enum view_format fmt = view_detect_format(f->path, &f->source, false);
             f->render_mode = (fmt != VIEW_FORMAT_RAW);
             f->force_render = false;
@@ -882,9 +924,10 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
     }
     if (!f->render_mode)
         return;
-    if (f->source.spool && !f->source.eof)
+    if (f->source.spool && f->source.size == 0 && !f->source.eof)
         return;
-    if (f->has_rendered && f->rendered_width == p->width)
+    if (f->has_rendered && f->rendered_width == p->width &&
+        (!f->source.spool || f->rendered_size == f->source.size))
         return;
     if (f->has_rendered) {
         source_close(&f->rendered);
@@ -893,12 +936,17 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
         f->has_rendered = false;
         f->rendered_format = VIEW_FORMAT_RAW;
     }
-    if (view_render_source(&f->source, f->path, p->width, p->opts.ascii,
-                           f->force_render, &f->rendered,
-                           &f->rendered_styles, &f->rendered_links,
-                           &f->rendered_format) == 0) {
+    bool saved_eof = f->source.eof;
+    f->source.eof = true;
+    int rc = view_render_source(&f->source, f->path, p->width, p->opts.ascii,
+                                f->force_render, &f->rendered,
+                                &f->rendered_styles, &f->rendered_links,
+                                &f->rendered_format);
+    f->source.eof = saved_eof;
+    if (rc == 0) {
         f->has_rendered = true;
         f->rendered_width = p->width;
+        f->rendered_size = f->source.size;
         invalidate_row_index(f);
     } else {
         f->render_mode = false;
@@ -1091,6 +1139,8 @@ static int follow_focused_link(struct pager *p)
         return 0;
     }
     if (kind == TAM_URI_EXTERNAL) {
+        char safe[SEARCH_SIZE];
+        view_label(safe, sizeof(safe), p->width > 22 ? p->width - 22 : 40, url);
         if (!p->pending_external || strcmp(p->pending_external, url) != 0) {
             free(p->pending_external);
             p->pending_external = strdup(url);
@@ -1100,7 +1150,7 @@ static int follow_focused_link(struct pager *p)
             }
             p->external_armed = true;
             snprintf(p->message_buf, sizeof(p->message_buf),
-                     "Press again to open: %s", url);
+                     "Press again to open: %s", safe);
             p->message = p->message_buf;
             return 0;
         }
@@ -1110,8 +1160,6 @@ static int follow_focused_link(struct pager *p)
             p->message = "Could not open external link";
             return 0;
         }
-        char safe[SEARCH_SIZE];
-        view_label(safe, sizeof(safe), p->width > 10 ? p->width - 10 : 40, url);
         snprintf(p->message_buf, sizeof(p->message_buf), "Started opener: %s", safe);
         p->message = p->message_buf;
         return 0;
@@ -1534,9 +1582,10 @@ static int last_page(struct pager *p, struct position end)
 
 static int step_job(struct pager *p)
 {
+    struct file_entry *cur = &p->files[p->file_index];
     struct source *s = p->source;
     if (p->job == GO_END) {
-        if (!s->eof)
+        if (!s->eof || !cur->source.eof)
             return VIEW_WAIT;
         off_t size = 0;
         if (source_refresh(s, &size) < 0)
@@ -1983,18 +2032,7 @@ static int refresh_size(struct pager *p)
     if (align(p, p->attn, &p->attn) < 0)
         return -1;
     catch_link_on_attn(p, 1);
-    const struct view_links *links = active_links(p);
-    off_t start, end;
-    if (links && previous_link >= 0 && (size_t)previous_link < links->count &&
-        row_byte_range(p, p->attn, &start, &end)) {
-        for (size_t i = 0; i < links->span_count; i++) {
-            if (links->spans[i].link_index == (size_t)previous_link &&
-                links->spans[i].start < end && links->spans[i].end > start) {
-                p->focused_link = previous_link;
-                break;
-            }
-        }
-    }
+    restore_link_on_attn(p, previous_link);
     return 0;
 }
 
@@ -2084,15 +2122,15 @@ static int run(struct pager *p, int wake)
             tam_key_init(&p->keys);
 
         struct file_entry *current_file = &p->files[p->file_index];
-        bool rendering_input = current_file->render_mode &&
+        bool rendering_input = (current_file->render_mode || !current_file->render_inited) &&
                                current_file->source.spool &&
                                !current_file->source.eof;
-        bool pump = !p->source->eof &&
+        bool pump = !current_file->source.eof &&
                     (rendering_input || p->waiting || job_state == VIEW_WAIT || p->following);
         struct pollfd fds[] = {
             {.fd = wake, .events = POLLIN},
             {.fd = p->tty.in_fd, .events = POLLIN},
-            {.fd = pump ? p->source->input : -1, .events = POLLIN}
+            {.fd = pump ? current_file->source.input : -1, .events = POLLIN}
         };
         bool scanning = p->job != IDLE && job_state != VIEW_WAIT;
         int timeout = scanning ? 0
@@ -2140,17 +2178,26 @@ static int run(struct pager *p, int wake)
             continue;
         }
         if (fds[2].revents) {
-            if (source_pump(p->source) < 0)
+            if (source_pump(&current_file->source) < 0)
                 return -1;
-            if (rendering_input && current_file->source.eof) {
+            if (rendering_input) {
+                if (pump_ready_source(&current_file->source) < 0)
+                    return -1;
+                ssize_t previous_link = p->focused_link;
                 ensure_rendered(p, current_file);
                 p->source = active_source(current_file);
-                p->top = (struct position){0};
-                p->attn = p->top;
+                off_t sz = source_size(p->source);
+                if (sz >= 0 && p->top.byte >= sz)
+                    p->top = (struct position){0};
+                if (sz >= 0 && p->attn.byte >= sz)
+                    p->attn = p->top;
+                if (align(p, p->top, &p->top) < 0 ||
+                    align(p, p->attn, &p->attn) < 0)
+                    return -1;
+                catch_link_on_attn(p, 1);
+                restore_link_on_attn(p, previous_link);
                 p->current.valid = false;
                 p->dirty = true;
-                catch_link_on_attn(p, 1);
-                continue;
             }
             if (p->following) {
                 p->job = GO_END;
