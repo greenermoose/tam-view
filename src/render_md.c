@@ -347,6 +347,77 @@ static bool parse_list_item(const char *line, size_t len, int *indent_out,
     return false;
 }
 
+static bool is_atx_heading(const char *line, size_t len, int *level_out,
+                           size_t *text_start, size_t *text_end)
+{
+    size_t i = 0;
+    while (i < len && i < 3 && line[i] == ' ')
+        i++;
+    if (i >= len || line[i] != '#')
+        return false;
+    size_t h = 0;
+    while (i + h < len && h < 6 && line[i + h] == '#')
+        h++;
+    if (i + h >= len || (line[i + h] != ' ' && line[i + h] != '\t'))
+        return false;
+    size_t ts = i + h;
+    while (ts < len && isspace((unsigned char)line[ts]))
+        ts++;
+    size_t te = len;
+    while (te > ts && isspace((unsigned char)line[te - 1]))
+        te--;
+    size_t hc = te;
+    while (hc > ts && line[hc - 1] == '#')
+        hc--;
+    if (hc < te && (hc == ts || isspace((unsigned char)line[hc - 1]))) {
+        te = hc;
+        while (te > ts && isspace((unsigned char)line[te - 1]))
+            te--;
+    }
+    if (level_out)
+        *level_out = (int)h;
+    if (text_start)
+        *text_start = ts;
+    if (text_end)
+        *text_end = te;
+    return true;
+}
+
+static bool is_list_continuation(const char *src, size_t len, const char *cl,
+                                 size_t clen, size_t cnext)
+{
+    size_t cws = 0;
+    while (cws < clen && isspace((unsigned char)cl[cws]))
+        cws++;
+    if (cws == clen)
+        return false;
+    if (clen - cws >= 3 &&
+        ((cl[cws] == '`' && cl[cws + 1] == '`' && cl[cws + 2] == '`') ||
+         (cl[cws] == '~' && cl[cws + 1] == '~' && cl[cws + 2] == '~')))
+        return false;
+    if (is_atx_heading(cl, clen, NULL, NULL, NULL))
+        return false;
+    if (is_hrule(cl, clen))
+        return false;
+    if (cl[cws] == '>')
+        return false;
+    if (cl[cws] == '|' && cnext < len) {
+        const char *l2 = NULL;
+        size_t l2_len = 0;
+        next_line(src, len, cnext, &l2, &l2_len);
+        if (is_table_sep(l2, l2_len))
+            return false;
+    }
+    int dummy_indent = 0;
+    bool dummy_ordered = false;
+    char dummy_num[16] = {0};
+    size_t dummy_off = 0;
+    if (parse_list_item(cl, clen, &dummy_indent, &dummy_ordered, dummy_num,
+                        sizeof(dummy_num), &dummy_off))
+        return false;
+    return true;
+}
+
 static void emit_heading(struct rbuf *b, int level, const char *text,
                          size_t len, int width, bool ascii)
 {
@@ -363,8 +434,8 @@ static void emit_heading(struct rbuf *b, int level, const char *text,
     const char *s = tmp.data ? tmp.data : "";
     rbuf_add_heading_anchor(b, s, tmp.len, anchor_byte);
 
+    rbuf_wrap_styled(b, &tmp, width, "", "", VIEW_STYLE_NONE);
     if (level <= 2) {
-        rbuf_wrap_styled(b, &tmp, width, "", "", VIEW_STYLE_NONE);
         int w = render_str_width(s, strlen(s));
         if (w > width)
             w = width;
@@ -374,13 +445,6 @@ static void emit_heading(struct rbuf *b, int level, const char *text,
         rbuf_repeat(b, level == 1 ? box->d_h : box->h, w);
         rbuf_push_span(b, rs, b->len, VIEW_STYLE_RULE);
         rbuf_putc(b, '\n');
-    } else {
-        char pfx[16];
-        int n = level > 6 ? 6 : level;
-        memset(pfx, '#', (size_t)n);
-        pfx[n] = ' ';
-        pfx[n + 1] = '\0';
-        rbuf_wrap_styled(b, &tmp, width, pfx, "  ", hstyle);
     }
     rbuf_free(&tmp);
 }
@@ -482,30 +546,17 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
         }
 
         // ATX heading.
-        if (line[0] == '#') {
-            size_t h = 0;
-            while (h < llen && h < 6 && line[h] == '#')
-                h++;
-            if (h < llen && (line[h] == ' ' || line[h] == '\t')) {
-                if (para.len > 0) {
-                    rbuf_blank_line(b);
-                    rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
-                    rbuf_clear(&para);
-                }
-                size_t ts = h;
-                while (ts < llen && isspace((unsigned char)line[ts]))
-                    ts++;
-                size_t te = llen;
-                while (te > ts && isspace((unsigned char)line[te - 1]))
-                    te--;
-                while (te > ts && line[te - 1] == '#')
-                    te--;
-                while (te > ts && isspace((unsigned char)line[te - 1]))
-                    te--;
-                emit_heading(b, (int)h, line + ts, te - ts, width, ascii);
-                pos = next;
-                continue;
+        int hlevel = 0;
+        size_t ts = 0, te = 0;
+        if (is_atx_heading(line, llen, &hlevel, &ts, &te)) {
+            if (para.len > 0) {
+                rbuf_blank_line(b);
+                rbuf_wrap_styled(b, &para, width, "", "", VIEW_STYLE_NONE);
+                rbuf_clear(&para);
             }
+            emit_heading(b, hlevel, line + ts, te - ts, width, ascii);
+            pos = next;
+            continue;
         }
 
         // Horizontal rule.
@@ -608,9 +659,40 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
             } else if (b->len > 0) {
                 rbuf_newline(b);
             }
+            struct rbuf raw_item;
+            rbuf_init(&raw_item);
+            size_t fs = off;
+            size_t fe = llen;
+            while (fs < fe && isspace((unsigned char)line[fs]))
+                fs++;
+            while (fe > fs && isspace((unsigned char)line[fe - 1]))
+                fe--;
+            if (fe > fs)
+                rbuf_putn(&raw_item, line + fs, fe - fs);
+            pos = next;
+            while (pos < len) {
+                const char *cl = NULL;
+                size_t clen = 0;
+                size_t cnext = next_line(src, len, pos, &cl, &clen);
+                if (!is_list_continuation(src, len, cl, clen, cnext))
+                    break;
+                size_t cs = 0;
+                size_t ce = clen;
+                while (cs < ce && isspace((unsigned char)cl[cs]))
+                    cs++;
+                while (ce > cs && isspace((unsigned char)cl[ce - 1]))
+                    ce--;
+                if (ce > cs) {
+                    if (raw_item.len > 0)
+                        rbuf_putc(&raw_item, ' ');
+                    rbuf_putn(&raw_item, cl + cs, ce - cs);
+                }
+                pos = cnext;
+            }
             struct rbuf item;
             rbuf_init(&item);
-            inline_md(&item, line + off, llen - off);
+            inline_md(&item, raw_item.data ? raw_item.data : "", raw_item.len);
+            rbuf_free(&raw_item);
             int level = indent / 2;
             if (level > 4)
                 level = 4;
@@ -632,7 +714,6 @@ void render_markdown(struct rbuf *b, const char *src, size_t len,
             }
             rbuf_wrap_styled(b, &item, width, fpfx, cpfx, VIEW_STYLE_BOLD);
             rbuf_free(&item);
-            pos = next;
             continue;
         }
 

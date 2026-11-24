@@ -332,6 +332,59 @@ static void test_links_and_anchors(void)
     free(out);
 }
 
+static void test_markdown_lists_and_headings(void)
+{
+    const char *md =
+        "### Adopt\n"
+        "- **Strict one-owner-per-layer modifier separation** (`a.md`,\n"
+        "  `b.md`, `c.md`):\n"
+        "  - `Meta` = compositor exclusively. Never bound by apps;\n"
+        "    compositor never steals non-`Meta` chords.\n"
+        "  - **Multi-line\n"
+        "    bold** item.\n"
+        "\n"
+        "#### Level Four ###\n"
+        "##### C# Notes\n"
+        "###### Deepest\n"
+        "\n"
+        "3. **Physical-ergonomics breakdown.**\n"
+        "   Squeezing modifier richness onto a keyboard\n"
+        "   produces contortions.\n"
+        "4. **Next item.**\n";
+
+    struct view_styles st = {0};
+    struct view_links lk = {0};
+    char *out = render_str_all(VIEW_FORMAT_MARKDOWN, md, 60, false, &st, &lk);
+
+    // H3..H6 render without literal '#' prefixes and carry VIEW_STYLE_H3.
+    assert(!strstr(out, "### Adopt"));
+    assert(!strstr(out, "#### Level Four"));
+    assert(!strstr(out, "##### C# Notes"));
+    assert(!strstr(out, "###### Deepest"));
+    assert(strstr(out, "Adopt\n"));
+    assert(strstr(out, "Level Four\n"));
+    assert(strstr(out, "C# Notes\n"));
+    assert(strstr(out, "Deepest\n"));
+    assert(has_style(&st, VIEW_STYLE_H3));
+    assert(lk.anchor_count == 4);
+    assert(strcmp(lk.anchors[0].id, "adopt") == 0);
+    assert(strcmp(lk.anchors[1].id, "level-four") == 0);
+    assert(strcmp(lk.anchors[3].id, "deepest") == 0);
+
+    // Wrapped list items join continuation lines without stray blank lines
+    // and wrap with hanging indentation.
+    assert(!strstr(out, "(a.md,\n\nb.md"));
+    assert(strstr(out, "\xe2\x80\xa2 Strict one-owner-per-layer modifier separation (a.md,\n  b.md, c.md):\n"));
+    assert(strstr(out, "  \xe2\x80\xa2 Meta = compositor exclusively. Never bound by apps;\n    compositor never steals non-Meta chords.\n"));
+    assert(strstr(out, "  \xe2\x80\xa2 Multi-line bold item.\n"));
+    assert(!strstr(out, "breakdown.\n\nSqueezing"));
+    assert(strstr(out, "3. Physical-ergonomics breakdown. Squeezing modifier\n   richness onto a keyboard produces contortions.\n4. Next item.\n"));
+
+    view_styles_free(&st);
+    view_links_free(&lk);
+    free(out);
+}
+
 int main(void)
 {
     test_short_source();
@@ -339,6 +392,7 @@ int main(void)
     assert(setlocale(LC_CTYPE, "C.UTF-8") || setlocale(LC_CTYPE, ""));
     test_detect();
     test_markdown();
+    test_markdown_lists_and_headings();
     test_html();
     test_mermaid();
     test_links_and_anchors();
