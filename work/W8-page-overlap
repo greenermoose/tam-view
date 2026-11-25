@@ -1,0 +1,40 @@
+W8 PAGE OVERLAP AND TERMINAL PADDING
+
+Date: 2026-11-25
+AI harness: Codex CLI 0.172.0
+AI model: gpt-6.2-sol
+Authorship: AI-assisted, directed by Fred
+Transcript: Retained privately by the author.
+
+GUIDANCE
+
+  Fred: "Change tam-view so that you can specify the overlap shown when you
+  page down a file that does not fit on two screens.  0 means no overlap:
+  when you page down, the first line on the new screen is the line after
+  the last one shown on the previous screen.  1 means one line of overlap,
+  2 means two, etc. Make the default 2 lines of overlap. The purpose of
+  this is to ensure the person reading the file can maintain context as
+  they page down or up through a long file.  Overlap should work in both
+  directions, down and up. Ask if you have questions."
+
+  Fred: "Fix display of short file on tall terminal, too. Pad below so
+  tam-view always fills terminal window and file starts at top of terminal
+  window."
+
+  Fred: "Implement the plan."
+
+DONE
+
+  - Full-page keys repeat two displayed rows by default. Set the count
+    with --overlap, including zero. Preserve the page start at EOF.
+  - Draw short text from the top, pad below it and leave the shell prompt
+    at the bottom. Verified with make test and make sanitize.
+
+FAILED
+
+  - LeakSanitizer could not inspect processes inside the sandbox. The
+    unchanged sanitizer suite passed outside the sandbox.
+
+HANDOFF
+
+  - Development verification is complete. WHATNOW tracks packaging.

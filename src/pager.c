@@ -31,7 +31,7 @@
 #define ANCHOR_BYTES 256
 #define ANCHOR_WINDOW (1024 * 1024)
 
-enum job { IDLE, ADVANCE, GO_LINE, GO_END, SEARCH };
+enum job { IDLE, ADVANCE, PAGE_FORWARD, GO_LINE, GO_END, SEARCH };
 enum prompt {
     COMMAND,
     FIND_FORWARD,
@@ -101,6 +101,8 @@ struct file_entry {
     struct position top;
     struct position attn;
     int h_offset;
+    struct position page_top;
+    bool page_top_valid;
     struct position *row_index;
     size_t row_count;
     size_t row_cap;
@@ -138,6 +140,7 @@ struct pager {
     struct position top;
     struct position attn;
     struct position cursor;
+    struct position page_target;
     ssize_t focused_link;
     int help_offset;
     struct nav_entry *history;
@@ -324,6 +327,12 @@ static int size_view(struct pager *p)
     p->next.text = text;
     p->next.stride = stride;
     return 0;
+}
+
+static int page_overlap(const struct pager *p)
+{
+    unsigned long limit = (unsigned long)(p->height - 1);
+    return (int)(p->opts.page_overlap < limit ? p->opts.page_overlap : limit);
 }
 
 static int read_logical_line(struct pager *p, off_t start,
@@ -815,7 +824,11 @@ static int paint(struct pager *p)
     bool eof_doc = state == VIEW_EOF && p->next.document;
     bool final = p->opts.quit_at_eof && eof_doc && !p->following &&
                  !p->hold_eof && at_last_file;
-    if (eof_doc && !p->keep_top && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
+    struct file_entry *file = &p->files[p->file_index];
+    if (p->next.document && !position_equal(file->page_top, p->top))
+        file->page_top_valid = false;
+    if (eof_doc && !p->keep_top && !file->page_top_valid &&
+        p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
         if (p->next.count == 0 && p->top.byte > 0) {
             off_t size = source_size(p->source);
             if (size < 0)
@@ -849,9 +862,11 @@ static int paint(struct pager *p)
 
     struct frame *old = &p->current;
     struct frame *f = &p->next;
+    int body_rows = p->tty.rows - 1;
+    bool single_row = body_rows == 0 && f->count > 0;
     int first = 0;
     bool scrolling = !p->redraw && old->valid && old->document && f->document &&
-                     old->count && f->count &&
+                     body_rows > 0 && old->count == body_rows && f->count > 0 &&
                      (position_equal(f->rows[0], old->rows[0]) ||
                       (p->scroll && position_compare(f->rows[0], old->rows[0]) > 0));
     if (scrolling) {
@@ -866,32 +881,24 @@ static int paint(struct pager *p)
     }
     if (!scrolling) {
         first = 0;
-        if (old->valid && cursor_move(p, old->count, 'A') < 0)
+        if (old->valid && cursor_move(p, body_rows, 'A') < 0)
             return -1;
     }
 
     for (int i = first; i < f->count; i++) {
         if (output(p, "\r\033[K") < 0 ||
             output(p, f->text + i * f->stride) < 0 ||
-            output(p, "\r\n") < 0)
+            (!single_row && output(p, "\r\n") < 0))
             return -1;
     }
+    for (int i = f->count; i < body_rows; i++) {
+        if (output(p, "\r\033[K\r\n") < 0)
+            return -1;
+    }
+    if (!single_row && output(p, "\r\033[K") < 0)
+        return -1;
 
-    if (old->valid || f->count || !final) {
-        if (output(p, "\r\033[K") < 0)
-            return -1;
-    }
-    if (!scrolling && old->valid) {
-        int extra = old->count - f->count;
-        for (int i = 0; i < extra; i++) {
-            if (output(p, "\033[B\r\033[K") < 0)
-                return -1;
-        }
-        if (extra > 0 && cursor_move(p, extra, 'A') < 0)
-            return -1;
-    }
-
-    if (!final && !p->quit) {
+    if (!single_row && !final && !p->quit) {
         char line[SEARCH_SIZE + 80];
         const char *message = p->message;
         if (eof_doc && !p->following && !message && !has_attention_line(p) &&
@@ -917,6 +924,8 @@ static int paint(struct pager *p)
     p->keep_top = false;
     p->waiting = state == VIEW_WAIT;
     if (final) {
+        if (single_row && output(p, "\r\n") < 0)
+            return -1;
         old->valid = false; // The prompt line is already clear.
         p->quit = true;
     }
@@ -1638,6 +1647,7 @@ static int last_page(struct pager *p, struct position end)
 {
     p->job = IDLE;
     p->dirty = true;
+    p->files[p->file_index].page_top_valid = false;
     if (back(p, end, p->height, &p->top) < 0)
         return -1;
     if (has_attention_line(p)) {
@@ -1815,25 +1825,34 @@ static int step_job(struct pager *p)
         // Some seekable pseudo-files report size zero despite having content.
     }
 
-    if (p->job == ADVANCE) {
-        for (; p->remaining; p->remaining--) {
+    if (p->job == ADVANCE || p->job == PAGE_FORWARD) {
+        bool full_page = p->job == PAGE_FORWARD;
+        int overlap = full_page ? page_overlap(p) : 0;
+        // Save the new top as we scan, then confirm there is a new row.
+        while (p->remaining) {
             struct position next;
             int result = view_row_h(s, p->cursor, p->width,
                                     p->h_offset, p->chop, NULL, &next);
             if (result == VIEW_EOF)
-                return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+                goto advance_eof;
             if (result != VIEW_ROW)
                 return result;
             p->cursor = next;
+            p->remaining--;
+            if (full_page && p->remaining == (unsigned)overlap)
+                p->page_target = next;
         }
         if (p->cursor.tab_left == 0) {
             int next = source_byte(s, p->cursor.byte);
             if (next == VIEW_EOF)
-                return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+                goto advance_eof;
             if (next < 0)
                 return next;
         }
-        p->top = p->cursor;
+        p->top = full_page ? p->page_target : p->cursor;
+        cur->page_top_valid = full_page;
+        if (full_page)
+            cur->page_top = p->top;
         if (has_attention_line(p)) {
             p->attn = p->top;
             catch_link_on_attn(p, 1);
@@ -1842,6 +1861,14 @@ static int step_job(struct pager *p)
         p->scroll = true;
         p->dirty = true;
         p->job = IDLE;
+        return VIEW_ROW;
+
+advance_eof:
+        if (!full_page)
+            return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+        // EOF is already visible. Keep the same page.
+        p->job = IDLE;
+        p->dirty = true;
         return VIEW_ROW;
     }
 
@@ -2109,9 +2136,18 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             return move_attn_up(p);
         movement = -1;
     } else if (key.type == TAM_KEY_PAGE_DOWN || c == ' ') {
-        movement = p->height;
+        if (p->current.at_eof)
+            return 0;
+        p->cursor = p->top;
+        p->remaining = (unsigned)p->height;
+        p->job = PAGE_FORWARD;
+        if (p->search.hit >= 0) {
+            p->search.hit = -1;
+            p->current.valid = false;
+        }
+        return 0;
     } else if (key.type == TAM_KEY_PAGE_UP || c == 'b') {
-        movement = -p->height;
+        movement = -(p->height - page_overlap(p));
     } else if (c == 'd') {
         movement = (p->height + 1) / 2;
     } else if (c == 'u') {
@@ -2235,7 +2271,7 @@ static int refresh_size(struct pager *p)
         return -1;
     p->current.valid = false;
     p->dirty = true;
-    if (p->job == ADVANCE)
+    if (p->job == ADVANCE || p->job == PAGE_FORWARD)
         p->job = IDLE;
     if (size_view(p) < 0)
         return -1;
@@ -2452,6 +2488,10 @@ static int run(struct pager *p, int wake)
                 if (align(p, p->top, &p->top) < 0 ||
                     align(p, p->attn, &p->attn) < 0)
                     return -1;
+                if (p->job == PAGE_FORWARD) {
+                    p->cursor = p->top;
+                    p->remaining = (unsigned)p->height;
+                }
                 catch_link_on_attn(p, 1);
                 restore_link_on_attn(p, previous_link);
                 p->current.valid = false;
@@ -2472,8 +2512,12 @@ static int run(struct pager *p, int wake)
         p->quit = true;
         if (paint(p) < 0)
             return -1;
-    } else if (p->current.valid && output(p, "\r\033[K") < 0) {
-        return -1;
+    }
+    if (p->current.valid) {
+        const char *cleanup = p->tty.rows == 1 && p->current.count > 0
+                            ? "\r\n" : "\r\033[K";
+        if (output(p, cleanup) < 0)
+            return -1;
     }
     return p->result;
 }

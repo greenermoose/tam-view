@@ -3,8 +3,15 @@ TAM-VIEW - A TERMINAL FILE VIEWER
 tam-view reads text files and piped input. It borrows its navigation
 from less and leaves the last page visible when you press q. At end of
 file it shows a message and waits for q (pass -E / --quit-at-eof to
-return automatically at EOF). The shell prompt appears on the line
-below the text.
+return automatically at EOF). File text starts at the top of the
+terminal, with blank rows below short files and short final pages.
+The shell prompt appears at the bottom when the viewer exits.
+
+Full-page navigation repeats two displayed rows for context in either
+direction. Use --overlap N (or --overlap=N) to set the number of repeated
+rows. With --overlap 0, the next page starts immediately after the previous
+page's last row. Wrapped lines count by their displayed rows, and a page
+always moves by at least one row when more content is available.
 
 Interactive named files are watched by default. Appends keep the last
 line visible when it was already on screen. Scroll up to read earlier

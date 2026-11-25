@@ -209,9 +209,10 @@ static void size(struct terminal *t, int rows, int cols)
     CHECK(ioctl(t->slave, TIOCSWINSZ, &ws) == 0);
 }
 
-static struct terminal start_env(const char *viewer, const char *path1,
-                                 const char *path2, int input, int producer,
-                                 const char *term_val)
+static struct terminal start_sized(const char *viewer, const char *path1,
+                                   const char *path2, int input, int producer,
+                                   const char *term_val, int rows, int cols,
+                                   const char *prior_output)
 {
     struct terminal t = {0};
     t.master = posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -223,7 +224,10 @@ static struct terminal start_env(const char *viewer, const char *path1,
     CHECK(t.slave >= 0 && tcgetattr(t.slave, &t.initial) == 0);
     for (int row = 0; row < ROWS; row++)
         memset(t.screen.cell[row], ' ', COLS);
-    size(&t, 4, 44);
+    size(&t, rows, cols);
+    if (prior_output)
+        CHECK(write(t.slave, prior_output, strlen(prior_output)) ==
+              (ssize_t)strlen(prior_output));
 
     t.child = fork();
     CHECK(t.child >= 0);
@@ -245,6 +249,14 @@ static struct terminal start_env(const char *viewer, const char *path1,
     }
     active = t.child;
     return t;
+}
+
+static struct terminal start_env(const char *viewer, const char *path1,
+                                 const char *path2, int input, int producer,
+                                 const char *term_val)
+{
+    return start_sized(viewer, path1, path2, input, producer, term_val,
+                       4, 44, NULL);
 }
 
 static struct terminal start_args(const char *viewer, const char *path1,
@@ -353,11 +365,11 @@ static void test_watch(const char *viewer, const char *path)
     CHECK(rename(replacement, path) == 0);
     expect(&t, 0, "after rotation");
     write_file(path, "");
-    expect(&t, 0, "End of file");
+    expect(&t, 0, "   ");
     append_file(path, "new start\n");
     expect(&t, 0, "new start");
     send_key(&t, "q");
-    finish(&t, 0, 1);
+    finish(&t, 0, 3);
     close_terminal(&t);
 
     write_file(path, "old first\nold second\nold third\n");
@@ -407,7 +419,7 @@ static void test_pipe_follow(const char *viewer)
     CHECK(pipe(stream) == 0);
     struct terminal t = start(viewer, "-", stream[0], stream[1]);
     close(stream[0]);
-    expect(&t, 0, "Waiting for input");
+    expect(&t, 3, "Waiting for input");
     const char initial[] = "log1\nlog2\nlog3\nlog4\n";
     CHECK(write(stream[1], initial, sizeof(initial) - 1) == (ssize_t)sizeof(initial) - 1);
     expect(&t, 2, "log3");
@@ -423,6 +435,120 @@ static void test_pipe_follow(const char *viewer)
     close_terminal(&t);
 }
 
+static void expect_blank(struct terminal *t, int row)
+{
+    for (int col = 0; col < t->screen.cols; col++)
+        CHECK(t->screen.cell[row][col] == ' ');
+}
+
+static void test_page_overlap(const char *viewer, const char *path)
+{
+    write_file(path, "row 1\nrow 2\nrow 3\nrow 4\nrow 5\nrow 6\nrow 7\n");
+    struct terminal t = start_sized(viewer, "--overlap=1", path, -1, -1,
+                                    "linux", 5, 44, NULL);
+    expect(&t, 3, "row 4");
+    send_key(&t, "\033[6~");
+    expect(&t, 0, "row 4");
+    expect(&t, 3, "row 7");
+    send_key(&t, "b");
+    expect(&t, 0, "row 1");
+    size(&t, 6, 44);
+    expect(&t, 4, "row 5");
+    send_key(&t, "\033[6~");
+    expect(&t, 0, "row 5");
+    expect(&t, 5, "End of file");
+    expect_blank(&t, 3);
+    expect_blank(&t, 4);
+    send_key(&t, "\033[5~");
+    expect(&t, 0, "row 1");
+    send_key(&t, "q");
+    finish(&t, 0, 5);
+    close_terminal(&t);
+
+    write_file(path, "row 1\nrow 2\nrow 3\nrow 4\nrow 5\n");
+    t = start_args(viewer, "--overlap=0", path, -1, -1);
+    expect(&t, 2, "row 3");
+    send_key(&t, " ");
+    expect(&t, 3, "End of file");
+    CHECK(contains(&t, 0, "row 4") && contains(&t, 1, "row 5"));
+    expect_blank(&t, 2);
+    send_key(&t, " b");
+    expect(&t, 0, "row 1");
+    send_key(&t, "  q");
+    finish(&t, 0, 3);
+    CHECK(contains(&t, 0, "row 4") && contains(&t, 1, "row 5"));
+    expect_blank(&t, 2);
+    close_terminal(&t);
+
+    write_file(path, "AAAAAAAAAABBBBBBBBBBCCCCCCCCCCDDDDDDDDDD\nrow 5\n");
+    t = start_sized(viewer, "--overlap=99", path, -1, -1,
+                    "linux", 4, 10, NULL);
+    expect(&t, 2, "CCCCCCCCCC");
+    send_key(&t, " ");
+    expect(&t, 0, "BBBBBBBBBB");
+    expect(&t, 2, "DDDDDDDDDD");
+    send_key(&t, "b");
+    expect(&t, 0, "AAAAAAAAAA");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+}
+
+static void test_short_screen(const char *viewer, const char *path)
+{
+    write_file(path, "only row\n");
+    const char *prior = "old first\r\nold second\r\nold prompt";
+    struct terminal t = start_sized(viewer, path, NULL, -1, -1,
+                                    "linux", 9, 44, prior);
+    expect(&t, 8, "End of file");
+    CHECK(contains(&t, 0, "only row"));
+    for (int row = 1; row < 8; row++)
+        expect_blank(&t, row);
+    send_key(&t, "q");
+    finish(&t, 0, 8);
+    CHECK(contains(&t, 0, "only row"));
+    close_terminal(&t);
+
+    t = start_sized(viewer, "-E", path, -1, -1, "linux", 9, 44, prior);
+    finish(&t, 0, 8);
+    CHECK(contains(&t, 0, "only row"));
+    for (int row = 1; row < 8; row++)
+        expect_blank(&t, row);
+    close_terminal(&t);
+
+    t = start_sized(viewer, path, NULL, -1, -1, "linux", 1, 44, NULL);
+    expect(&t, 0, "only row");
+    send_key(&t, "q");
+    finish(&t, 0, 0);
+    close_terminal(&t);
+}
+
+static void test_pipe_page(const char *viewer)
+{
+    int input[2];
+    CHECK(pipe(input) == 0);
+    struct terminal t = start_args(viewer, "--overlap=0", "-", input[0], input[1]);
+    close(input[0]);
+    CHECK(write(input[1], "a\nb\nc\n", 6) == 6);
+    expect(&t, 2, "c");
+    send_key(&t, " ");
+    expect(&t, 3, "Waiting for input");
+    CHECK(contains(&t, 0, "a"));
+    CHECK(write(input[1], "d\n", 2) == 2);
+    expect(&t, 0, "d");
+    send_key(&t, " ");
+    CHECK(close(input[1]) == 0);
+    expect(&t, 3, "End of file");
+    CHECK(contains(&t, 0, "d"));
+    expect_blank(&t, 1);
+    expect_blank(&t, 2);
+    send_key(&t, "b");
+    expect(&t, 0, "a");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
@@ -433,6 +559,9 @@ int main(int argc, char **argv)
 
     test_watch(argv[1], path);
     test_pipe_follow(argv[1]);
+    test_page_overlap(argv[1], path);
+    test_short_screen(argv[1], path);
+    test_pipe_page(argv[1]);
 
     write_file(path, "01 one\n02 two\n03 three\n04 four\n05 five\n"
                      "06 six\n07 needle.[x]\n08 eight\n09 nine\n"
@@ -446,7 +575,8 @@ int main(int argc, char **argv)
     send_key(&t, "k");
     expect(&t, 0, "01 one");
     send_key(&t, " ");
-    expect(&t, 0, "04 four");
+    expect(&t, 0, "02 two");
+    expect(&t, 2, "04 four");
     send_key(&t, "\033[5~");
     expect(&t, 0, "01 one");
     send_key(&t, "d");
@@ -500,14 +630,16 @@ int main(int argc, char **argv)
 
     write_file(path, "");
     t = start(argv[1], path, -1, -1);
-    expect(&t, 0, "End of file (q quit)");
+    expect(&t, 3, "End of file (q quit)");
     send_key(&t, "q");
-    finish(&t, 0, 0);
+    finish(&t, 0, 3);
     close_terminal(&t);
 
     write_file(path, "first\nsecond\nthird\nfourth\nfifth\n");
     t = start(argv[1], path, -1, -1);
     expect(&t, 3, path);
+    send_key(&t, " ");
+    expect(&t, 0, "second");
     send_key(&t, " ");
     expect(&t, 3, "End of file (q quit)");
     send_key(&t, "q");
@@ -534,7 +666,7 @@ int main(int argc, char **argv)
     CHECK(pipe(stream) == 0);
     t = start(argv[1], NULL, stream[0], stream[1]);
     close(stream[0]);
-    expect(&t, 0, "Waiting for input");
+    expect(&t, 3, "Waiting for input");
     const char chunk[] = "alpha\nbeta\ngamma\ndelta\n";
     CHECK(write(stream[1], chunk, sizeof(chunk) - 1) == (ssize_t)sizeof(chunk) - 1);
     expect(&t, 2, "gamma");
@@ -558,13 +690,13 @@ int main(int argc, char **argv)
     CHECK(write(stream[1], "a\n", 2) == 2);
     expect(&t, 0, "a");
     send_key(&t, "j");
-    expect(&t, 1, "Waiting for input");
+    expect(&t, 3, "Waiting for input");
     CHECK(contains(&t, 0, "a"));
     CHECK(write(stream[1], "b", 1) == 1);
     CHECK(close(stream[1]) == 0);
-    expect(&t, 2, "End of file (q quit)");
+    expect(&t, 3, "End of file (q quit)");
     send_key(&t, "q");
-    finish(&t, 0, 2);
+    finish(&t, 0, 3);
     CHECK(contains(&t, 1, "b"));
     close_terminal(&t);
 
@@ -851,7 +983,7 @@ int main(int argc, char **argv)
         expect(&t, 1, "=====");
         CHECK(!contains(&t, 0, "# First"));
         send_key(&t, "q");
-        finish(&t, 0, 2);
+        finish(&t, 0, 3);
         close(input[1]);
         close_terminal(&t);
 
@@ -901,7 +1033,7 @@ int main(int argc, char **argv)
         expect(&t, 0, "Piped HTML");
         expect(&t, 1, "==========");
         send_key(&t, "q");
-        finish(&t, 0, 2);
+        finish(&t, 0, 3);
         close_terminal(&t);
     }
     CHECK(unlink(path) == 0);

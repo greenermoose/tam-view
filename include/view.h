@@ -162,6 +162,7 @@ struct view_row_style {
 
 struct view_options {
     enum view_mode mode;
+    unsigned long page_overlap;
     enum view_color color_mode;
     enum view_hyperlinks hyperlinks_mode;
     bool color;

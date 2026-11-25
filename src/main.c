@@ -9,8 +9,9 @@
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--no-watch] [--ascii] [--color[=WHEN]|--no-color] [--hyperlinks[=WHEN]|--no-hyperlinks] [--] [FILE|- ...]\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--overlap N] [--no-watch] [--ascii] [--color[=WHEN]|--no-color] [--hyperlinks[=WHEN]|--no-hyperlinks] [--] [FILE|- ...]\n"
           "View files or piped input. Markup renders by default; the final page stays visible.\n"
+          "Use --overlap N or --overlap=N to repeat N displayed rows when paging (default 2).\n"
           "Press g for keybindings guide, or q to quit.\n", out);
 }
 
@@ -71,7 +72,7 @@ int main(int argc, char **argv)
 
     size_t file_count = 0;
     bool options = true;
-    struct view_options opts = {0};
+    struct view_options opts = {.page_overlap = 2};
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
         if (options && !strcmp(arg, "--")) {
@@ -86,6 +87,19 @@ int main(int argc, char **argv)
             opts.quit_at_eof = false;
         } else if (options && !strcmp(arg, "--no-watch")) {
             opts.no_watch = true;
+        } else if (options && (!strcmp(arg, "--overlap") ||
+                               !strncmp(arg, "--overlap=", 10))) {
+            const char *value = arg[9] == '=' ? arg + 10
+                              : i + 1 < argc ? argv[++i] : "";
+            char *end;
+            errno = 0;
+            unsigned long overlap = strtoul(value, &end, 10);
+            if (value[0] < '0' || value[0] > '9' || *end || errno == ERANGE) {
+                fputs("tam-view: --overlap needs a nonnegative integer\n", stderr);
+                free(inputs);
+                return 2;
+            }
+            opts.page_overlap = overlap;
         } else if (options && !strcmp(arg, "--ascii")) {
             opts.ascii = true;
         } else if (options && (!strcmp(arg, "--color") ||

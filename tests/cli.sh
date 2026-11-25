@@ -10,9 +10,23 @@ test "$("$bin" --version)" = "tam-view $expected"
 "$bin" --help > help
 grep -F 'Usage: tam-view' help >/dev/null
 grep -F -- '--no-watch' help >/dev/null
+grep -F -- '--overlap N' help >/dev/null
 printf 'one\000two\033[2J\r\nthree' > ./-dash
 "$bin" --raw -- -dash > output
 cmp -- -dash output
+"$bin" --overlap 1 -- -dash > output
+cmp -- -dash output
+"$bin" --overlap=0 -- -dash > output
+cmp -- -dash output
+for value in '' -1 x 1.5 ' 2' 9999999999999999999999999999999999999999; do
+    status=0
+    "$bin" "--overlap=$value" -- -dash > output 2> error || status=$?
+    test "$status" -eq 2
+    grep -F -- '--overlap needs a nonnegative integer' error >/dev/null
+done
+status=0
+"$bin" --overlap > output 2> error || status=$?
+test "$status" -eq 2
 "$bin" -r -- -dash > output
 cmp -- -dash output
 "$bin" --no-watch -- -dash > output
