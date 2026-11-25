@@ -6,9 +6,9 @@ Updated: 2026-11-25, with W8
 
 STATE
 
-  Full-page navigation repeats two displayed rows by default. --overlap
-  sets the count in both directions. Short pages start at the top with
-  blank rows below the text. W8 records verification.
+  0.4.2 on dev repeats two displayed rows by default on full-page moves.
+  --overlap sets the count in both directions. Short pages start at the
+  top with blank rows below the text. W8 records verification.
 
   Named files now watch by default on dev. --no-watch snapshots each
   named file. W7 and P5 record behavior and verification.

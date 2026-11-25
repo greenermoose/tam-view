@@ -33,3 +33,9 @@ follow hyperlinks from Markdown and HTML. Support keyboard link cycling
 and following (opening local/relative documents and anchors inside
 tam-view with back-history, and handing external URLs to `xdg-open`),
 plus optional OSC 8 terminal hyperlinks on capable terminals.
+
+## 0.4.2 — Page overlap and full-window layout
+
+Full-page navigation repeats two displayed rows by default. Set the
+count in both directions with `--overlap`. Short files and short final
+pages start at the top of the terminal, with the footer at the bottom.

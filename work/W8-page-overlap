@@ -5,6 +5,7 @@ AI harness: Codex CLI 0.172.0
 AI model: gpt-6.2-sol
 Authorship: AI-assisted, directed by Fred
 Transcript: Retained privately by the author.
+Commits: ead4258
 
 GUIDANCE
 
@@ -23,12 +24,15 @@ GUIDANCE
 
   Fred: "Implement the plan."
 
+  Fred: "Bump the version."
+
 DONE
 
   - Full-page keys repeat two displayed rows by default. Set the count
     with --overlap, including zero. Preserve the page start at EOF.
   - Draw short text from the top, pad below it and leave the shell prompt
     at the bottom. Verified with make test and make sanitize.
+  - Bumped the version to 0.4.2 and verified it with make test.
 
 FAILED
 
