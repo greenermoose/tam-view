@@ -310,12 +310,129 @@ static void write_file(const char *path, const char *text)
     CHECK(close(fd) == 0);
 }
 
+static void append_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_APPEND);
+    CHECK(fd >= 0);
+    CHECK(write(fd, text, strlen(text)) == (ssize_t)strlen(text));
+    CHECK(close(fd) == 0);
+}
+
+static void test_watch(const char *viewer, const char *path)
+{
+    write_file(path, "one\ntwo\nthree\nfour\nfive");
+    struct terminal t = start(viewer, path, -1, -1);
+    expect(&t, 3, path);
+    append_file(path, "-extended\nsix\n");
+    // A simultaneous rewrite in the visible region makes the append
+    // observable without relying on a fixed sleep.
+    int fd = open(path, O_WRONLY);
+    CHECK(fd >= 0 && pwrite(fd, "ONE", 3, 0) == 3 && close(fd) == 0);
+    expect(&t, 0, "ONE");
+    fd = open(path, O_WRONLY);
+    CHECK(fd >= 0 && pwrite(fd, "TWO", 3, 4) == 3 && close(fd) == 0);
+    expect(&t, 1, "TWO");
+    append_file(path, "seven\n");
+    for (int i = 0; i < 8; i++)
+        drain(&t, 50);
+    CHECK(contains(&t, 0, "ONE") && contains(&t, 2, "three"));
+    send_key(&t, "G");
+    expect(&t, 2, "seven");
+    append_file(path, "eight");
+    expect(&t, 2, "eight");
+    append_file(path, "-extended");
+    expect(&t, 2, "eight-extended");
+
+    // Atomic replacement and temporary absence both use the viewed path.
+    char replacement[] = "/tmp/tam-view-watch-XXXXXX";
+    fd = mkstemp(replacement);
+    CHECK(fd >= 0 && close(fd) == 0);
+    CHECK(rename(path, replacement) == 0);
+    expect(&t, 3, "File unavailable");
+    write_file(replacement, "after rotation\n");
+    CHECK(rename(replacement, path) == 0);
+    expect(&t, 0, "after rotation");
+    write_file(path, "");
+    expect(&t, 0, "End of file");
+    append_file(path, "new start\n");
+    expect(&t, 0, "new start");
+    send_key(&t, "q");
+    finish(&t, 0, 1);
+    close_terminal(&t);
+
+    write_file(path, "old first\nold second\nold third\n");
+    fd = open(path, O_WRONLY | O_APPEND);
+    CHECK(fd >= 0);
+    char block[4096];
+    memset(block, 'x', sizeof(block));
+    for (size_t i = 63; i < sizeof(block); i += 64)
+        block[i] = '\n';
+    for (int i = 0; i < 20; i++)
+        CHECK(write(fd, block, sizeof(block)) == (ssize_t)sizeof(block));
+    CHECK(close(fd) == 0);
+    append_file(path, "old fourth\nold fifth\n");
+    t = start_args(viewer, "--no-watch", path, -1, -1);
+    expect(&t, 0, "old first");
+    write_file(path, "new first\nnew second\nnew third\nnew fourth\nnew fifth\n");
+    send_key(&t, "G");
+    expect(&t, 2, "old fifth");
+    send_key(&t, "F");
+    expect(&t, 3, "Watch disabled");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+
+    write_file(path, "# Title\n\nFirst paragraph.\n\nSecond paragraph.\n\n"
+                     "Third paragraph.\n\nFourth paragraph.\n\nFifth paragraph.\n");
+    t = start_args(viewer, "-R", path, -1, -1);
+    expect(&t, 0, "Title");
+    send_key(&t, "6g");
+    expect(&t, 0, "Second paragraph.");
+    char saved[] = "/tmp/tam-view-watch-save-XXXXXX";
+    fd = mkstemp(saved);
+    CHECK(fd >= 0 && close(fd) == 0);
+    write_file(saved, "# Title\n\nInserted above.\n\nFirst paragraph.\n\n"
+                      "Second paragraph.\n\nNEW third paragraph.\n\nFourth paragraph.\n");
+    CHECK(rename(saved, path) == 0);
+    expect(&t, 2, "NEW third paragraph.");
+    CHECK(contains(&t, 0, "Second paragraph."));
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close_terminal(&t);
+}
+
+static void test_pipe_follow(const char *viewer)
+{
+    int stream[2];
+    CHECK(pipe(stream) == 0);
+    struct terminal t = start(viewer, "-", stream[0], stream[1]);
+    close(stream[0]);
+    expect(&t, 0, "Waiting for input");
+    const char initial[] = "log1\nlog2\nlog3\nlog4\n";
+    CHECK(write(stream[1], initial, sizeof(initial) - 1) == (ssize_t)sizeof(initial) - 1);
+    expect(&t, 2, "log3");
+    send_key(&t, "F");
+    expect(&t, 2, "log4");
+    CHECK(write(stream[1], "log5\n", 5) == 5);
+    expect(&t, 2, "log5");
+    send_key(&t, "\003");
+    expect(&t, 3, "Follow stopped");
+    send_key(&t, "q");
+    finish(&t, 0, 3);
+    close(stream[1]);
+    close_terminal(&t);
+}
+
 int main(int argc, char **argv)
 {
     CHECK(argc == 2);
+    CHECK(unsetenv("NO_COLOR") == 0);
     char path[] = "/tmp/tam-view-test-XXXXXX";
     int fd = mkstemp(path);
     CHECK(fd >= 0 && close(fd) == 0);
+
+    test_watch(argv[1], path);
+    test_pipe_follow(argv[1]);
 
     write_file(path, "01 one\n02 two\n03 three\n04 four\n05 five\n"
                      "06 six\n07 needle.[x]\n08 eight\n09 nine\n"
@@ -511,6 +628,8 @@ int main(int argc, char **argv)
     expect(&t, 3, "file 2 of 2:");
     send_key(&t, " ");
     expect(&t, 3, "End of file (q quit)");
+    send_key(&t, "18446744073709551615:n");
+    expect(&t, 3, "No next file");
     send_key(&t, "q");
     finish(&t, 0, 3);
     CHECK(contains(&t, 0, "file2-b") && contains(&t, 2, "file2-d"));

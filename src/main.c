@@ -5,12 +5,11 @@
 #include <locale.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <unistd.h>
 
 static void usage(FILE *out)
 {
-    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--ascii] [--color[=WHEN]|--no-color] [--hyperlinks[=WHEN]|--no-hyperlinks] [--] [FILE|- ...]\n"
+    fputs("Usage: tam-view [-r|--raw] [-R|--render] [-E|--quit-at-eof] [--no-watch] [--ascii] [--color[=WHEN]|--no-color] [--hyperlinks[=WHEN]|--no-hyperlinks] [--] [FILE|- ...]\n"
           "View files or piped input. Markup renders by default; the final page stays visible.\n"
           "Press g for keybindings guide, or q to quit.\n", out);
 }
@@ -55,21 +54,9 @@ static int open_input(const char *path, const char **label_out)
             *label_out = "standard input";
         return STDIN_FILENO;
     }
-    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    int fd = source_open_file(path);
     if (fd < 0)
         return -1;
-    struct stat st;
-    if (fstat(fd, &st) < 0) {
-        int err = errno;
-        close(fd);
-        errno = err;
-        return -1;
-    }
-    if (!S_ISREG(st.st_mode)) {
-        close(fd);
-        errno = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
-        return -1;
-    }
     if (label_out)
         *label_out = path;
     return fd;
@@ -97,6 +84,8 @@ int main(int argc, char **argv)
             opts.quit_at_eof = true;
         } else if (options && !strcmp(arg, "--no-quit-at-eof")) {
             opts.quit_at_eof = false;
+        } else if (options && !strcmp(arg, "--no-watch")) {
+            opts.no_watch = true;
         } else if (options && !strcmp(arg, "--ascii")) {
             opts.ascii = true;
         } else if (options && (!strcmp(arg, "--color") ||
@@ -128,7 +117,9 @@ int main(int argc, char **argv)
             usage(stderr);
             return 2;
         } else {
-            inputs[file_count++] = (struct view_input){.path = arg, .fd = -1};
+            inputs[file_count++] = (struct view_input){
+                .path = arg, .fd = -1, .named = strcmp(arg, "-") != 0
+            };
         }
     }
     if (file_count == 0)

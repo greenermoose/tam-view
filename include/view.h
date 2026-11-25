@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/stat.h>
 #include <sys/types.h>
 
 enum view_result {
@@ -20,6 +21,7 @@ struct source {
     int fd;
     FILE *spool;
     bool eof;
+    bool bounded;
     off_t size;
     off_t block;
     size_t used;
@@ -27,11 +29,26 @@ struct source {
 };
 
 int source_open(struct source *s, int input);
+int source_open_file(const char *path);
+int source_snapshot(struct source *s, int input);
 void source_close(struct source *s);
 int source_pump(struct source *s);
 int source_byte(struct source *s, off_t offset);
 off_t source_size(struct source *s);
 int source_refresh(struct source *s, off_t *new_size);
+
+struct file_watch {
+    struct stat stat;
+    unsigned char *sample;
+    size_t sample_size;
+};
+
+enum watch_change { WATCH_UNCHANGED, WATCH_APPEND, WATCH_REWRITE };
+
+// On success, replacement is -1 or an open descriptor owned by the caller.
+int watch_check(struct file_watch *watch, const char *path, int fd,
+                int *replacement);
+void watch_close(struct file_watch *watch);
 
 struct position {
     off_t byte;
@@ -42,6 +59,7 @@ struct position {
 struct view_input {
     const char *path;
     int fd;
+    bool named;
 };
 
 enum view_format {
@@ -151,6 +169,7 @@ struct view_options {
     bool ascii;
     bool linux_vt;
     bool quit_at_eof;
+    bool no_watch;
 };
 
 void view_styles_free(struct view_styles *st);

@@ -1,0 +1,29 @@
+W7 WATCH MODE
+
+Date: 2026-11-25
+AI harness: codex 0.172.0
+AI model: gpt-6.2-sol
+
+GUIDANCE
+
+  Fred (excerpt): "Provide a watch mode as default for tam-view so that
+  it watches the file being displayed for viewing and updates if the
+  file on disk changes."
+  Fred: "Implement the plan."
+
+DONE
+
+  - Added path watching, conditional tail scrolling, text anchors for
+    rewrites, and a disk-backed snapshot for --no-watch.
+  - Fixed stale last-line redraw, F on live pipes, and :n overflow.
+  - Layout, render, PTY and CLI passed normally and with ASan + UBSan.
+
+FAILED
+
+  - LeakSanitizer cannot run under sandbox tracing. ASan + UBSan ran
+    with leak detection disabled.
+
+HANDOFF
+
+  Keep navigation state and terminal painting separate in future pager
+  work. Consolidate the remaining noninteractive paths in main.c.

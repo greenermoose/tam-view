@@ -2,9 +2,12 @@ WHATNOW
 
 Read this first at the start of a tam-view work session.
 
-Updated: 2026-11-23, with W6
+Updated: 2026-11-25, with W7
 
 STATE
+
+  Named files now watch by default on dev. --no-watch snapshots each
+  named file. W7 and P5 record behavior and verification.
 
   0.4.1 on dev fixes R1, using libtam 0.9.1. W6 records checks.
   Dev builds of libtam 0.9.1 and tam-view 0.4.1 installed to ~/.local.

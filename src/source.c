@@ -6,6 +6,40 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+int source_open_file(const char *path)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return -1;
+    struct stat st;
+    int error = 0;
+    if (fstat(fd, &st) < 0)
+        error = errno;
+    else if (!S_ISREG(st.st_mode))
+        error = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
+    if (!error)
+        return fd;
+    close(fd);
+    errno = error;
+    return -1;
+}
+
+static int open_spool(struct source *s)
+{
+    s->spool = tmpfile();
+    if (!s->spool)
+        return -1;
+    s->fd = fileno(s->spool);
+    if (fcntl(s->fd, F_SETFD, FD_CLOEXEC) < 0) {
+        int err = errno;
+        fclose(s->spool);
+        s->spool = NULL;
+        errno = err;
+        return -1;
+    }
+    return 0;
+}
+
 int source_open(struct source *s, int input)
 {
     *s = (struct source){.input = input, .fd = input, .block = -1};
@@ -25,18 +59,80 @@ int source_open(struct source *s, int input)
         s->eof = false;
     }
 
-    s->spool = tmpfile();
-    if (!s->spool)
-        return -1;
-    s->fd = fileno(s->spool);
-    if (fcntl(s->fd, F_SETFD, FD_CLOEXEC) < 0) {
-        int err = errno;
-        fclose(s->spool);
-        s->spool = NULL;
-        errno = err;
-        return -1;
+    return open_spool(s);
+}
+
+static int write_at(int fd, const unsigned char *data, size_t count, off_t offset)
+{
+    while (count) {
+        ssize_t n = pwrite(fd, data, count, offset);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n <= 0) {
+            if (n == 0)
+                errno = EIO;
+            return -1;
+        }
+        data += n;
+        offset += n;
+        count -= (size_t)n;
     }
     return 0;
+}
+
+int source_snapshot(struct source *s, int input)
+{
+    for (int attempt = 0; attempt < 3; attempt++) {
+        struct stat before, after;
+        if (fstat(input, &before) < 0)
+            return -1;
+        *s = (struct source){.input = -1, .fd = -1, .block = -1};
+        if (open_spool(s) < 0)
+            return -1;
+        // Read at most the initial size so a busy log cannot extend the copy.
+        // Some readable pseudo-files report zero bytes even when nonempty.
+        off_t limit = before.st_size > 0 ? before.st_size : INT64_MAX;
+        while (s->size < limit) {
+            off_t remaining = limit - s->size;
+            size_t length = remaining < VIEW_BLOCK ? (size_t)remaining : VIEW_BLOCK;
+            ssize_t n = pread(input, s->data, length, s->size);
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0)
+                goto failed;
+            if (n == 0)
+                break;
+            // Leave holes in the temporary file for all-zero blocks.
+            size_t first = 0;
+            while (first < (size_t)n && s->data[first] == 0)
+                first++;
+            if (write_at(s->fd, s->data + first, (size_t)n - first,
+                         s->size + (off_t)first) < 0)
+                goto failed;
+            s->size += n;
+        }
+        if (fstat(input, &after) < 0)
+            goto failed;
+        if (before.st_size == after.st_size &&
+            before.st_mtim.tv_sec == after.st_mtim.tv_sec &&
+            before.st_mtim.tv_nsec == after.st_mtim.tv_nsec &&
+            before.st_ctim.tv_sec == after.st_ctim.tv_sec &&
+            before.st_ctim.tv_nsec == after.st_ctim.tv_nsec) {
+            if (ftruncate(s->fd, s->size) < 0)
+                goto failed;
+            s->eof = true;
+            return 0;
+        }
+        source_close(s);
+    }
+    errno = EAGAIN;
+    return -1;
+
+failed:;
+    int error = errno;
+    source_close(s);
+    errno = error;
+    return -1;
 }
 
 void source_close(struct source *s)
@@ -60,26 +156,15 @@ int source_pump(struct source *s)
         errno = EFBIG;
         return -1;
     }
-    for (ssize_t done = 0; done < count;) {
-        ssize_t n = pwrite(s->fd, buf + done, (size_t)(count - done),
-                           s->size + done);
-        if (n < 0 && errno == EINTR)
-            continue;
-        if (n < 0)
-            return -1;
-        if (n == 0) {
-            errno = EIO;
-            return -1;
-        }
-        done += n;
-    }
+    if (write_at(s->fd, buf, (size_t)count, s->size) < 0)
+        return -1;
     s->size += count;
     return 0;
 }
 
 int source_byte(struct source *s, off_t offset)
 {
-    if (s->spool && offset >= s->size)
+    if ((s->spool || s->bounded) && offset >= s->size)
         return s->eof ? VIEW_EOF : VIEW_WAIT;
 
     if (s->block >= 0 && offset >= s->block &&
@@ -108,14 +193,14 @@ int source_byte(struct source *s, off_t offset)
 off_t source_size(struct source *s)
 {
     struct stat st;
-    if (s->spool)
+    if (s->spool || s->bounded)
         return s->size;
     return fstat(s->fd, &st) == 0 ? st.st_size : -1;
 }
 
 int source_refresh(struct source *s, off_t *new_size)
 {
-    if (s->spool) {
+    if (s->spool || s->bounded) {
         *new_size = s->size;
         return 0;
     }

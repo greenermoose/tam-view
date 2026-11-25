@@ -16,6 +16,7 @@
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define MAX_ROWS 512
@@ -26,6 +27,9 @@
 #define LINE_BUF_MAX (16 * 1024 * 1024)
 #define ROW_INDEX_MAX_BYTES (4 * 1024 * 1024)
 #define HISTORY_MAX 256
+#define WATCH_INTERVAL_MS 250
+#define ANCHOR_BYTES 256
+#define ANCHOR_WINDOW (1024 * 1024)
 
 enum job { IDLE, ADVANCE, GO_LINE, GO_END, SEARCH };
 enum prompt {
@@ -45,6 +49,7 @@ struct frame {
     int count;
     bool valid;
     bool document;
+    bool at_eof;
 };
 
 struct mark {
@@ -62,15 +67,29 @@ struct nav_entry {
     bool render_mode;
 };
 
+struct viewport_anchor {
+    off_t line_byte;
+    off_t row_offset;
+    size_t display_line;
+    size_t length;
+    int rows_above;
+    unsigned char text[ANCHOR_BYTES];
+};
+
 struct file_entry {
     const char *path;
     bool own_path;
+    bool named;
+    bool watch_unavailable;
+    struct file_watch watch;
+    struct viewport_anchor anchor;
     struct source source;
     struct source rendered;
     struct view_styles rendered_styles;
     struct view_links rendered_links;
     enum view_format rendered_format;
     bool has_rendered;
+    bool render_stale;
     int rendered_width;
     off_t rendered_size;
     bool render_mode;
@@ -148,6 +167,8 @@ struct pager {
     bool waiting;
     bool dirty;
     bool scroll;
+    bool redraw;
+    bool keep_top;
     bool quit;
     int result;
 };
@@ -392,8 +413,10 @@ static void ensure_row_index(struct pager *p)
         struct position next;
         int r = view_row_h(p->source, pos, p->width, p->h_offset, p->chop,
                            NULL, &next);
-        if (r != VIEW_ROW)
+        if (r == VIEW_EOF)
             break;
+        if (r != VIEW_ROW)
+            return;
         if (cur->row_count == cur->row_cap) {
             size_t ncap = cur->row_cap ? cur->row_cap * 2 : 128;
             struct position *grown = realloc(cur->row_index, ncap * sizeof(*grown));
@@ -562,7 +585,7 @@ static const char *const HELP_LINES[] = {
     "  n / N / Esc            Repeat / reverse / clear highlight",
     "  :n / :p / :x / :f      Next / prev / first / current file",
     "  R / C                  Toggle rendered view / color",
-    "  F                      Follow growing file or pipe (Ctrl-C stops)",
+    "  F                      Follow watched file or pipe (Ctrl-C stops)",
     "  g / h                  Toggle this keybindings guide",
     "  q                      Quit and keep the page"
 };
@@ -665,6 +688,8 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
         message = text;
     } else if (p->job == SEARCH) {
         message = "Searching... (Ctrl-C cancels)";
+    } else if (!message && p->files[p->file_index].watch_unavailable) {
+        message = "File unavailable (waiting for it to return)";
     } else if (!message && p->following) {
         message = "Waiting for data... (Ctrl-C to stop, q to quit)";
     } else if (!message && (page_state == VIEW_WAIT || p->job != IDLE)) {
@@ -742,6 +767,43 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
     }
 }
 
+static void capture_viewport(struct pager *p)
+{
+    struct file_entry *file = &p->files[p->file_index];
+    struct viewport_anchor *anchor = &file->anchor;
+    *anchor = (struct viewport_anchor){0};
+    if (p->next.count == 0)
+        return;
+    // The footer already indexes ordinary pages. Keep tail updates
+    // on large raw logs from indexing everything just to save an anchor.
+    if (file->render_mode || source_size(p->source) <= VIEW_BLOCK)
+        ensure_row_index(p);
+    anchor->display_line = row_index_lookup(file, p->next.rows[0]);
+    off_t previous = -1;
+    for (int row = 0; row < p->next.count; row++) {
+        off_t start = line_start(p->source, p->next.rows[row].byte);
+        if (start < 0 || start == previous)
+            continue;
+        previous = start;
+        size_t length = 0;
+        bool text = false;
+        for (; length < sizeof(anchor->text); length++) {
+            int b = source_byte(p->source, start + (off_t)length);
+            if (b < 0 || b == '\n')
+                break;
+            anchor->text[length] = (unsigned char)b;
+            text |= b != ' ' && b != '\t' && b != '\r';
+        }
+        if (text) {
+            anchor->line_byte = start;
+            anchor->row_offset = p->next.rows[row].byte - start;
+            anchor->length = length;
+            anchor->rows_above = row;
+            return;
+        }
+    }
+}
+
 static int paint(struct pager *p)
 {
     struct position end;
@@ -753,12 +815,7 @@ static int paint(struct pager *p)
     bool eof_doc = state == VIEW_EOF && p->next.document;
     bool final = p->opts.quit_at_eof && eof_doc && !p->following &&
                  !p->hold_eof && at_last_file;
-    if (eof_doc && !p->following && !final && !p->message &&
-        !has_attention_line(p)) {
-        p->message = at_last_file ? "End of file (q quit)"
-                                  : "End of file (:n next, q quit)";
-    }
-    if (eof_doc && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
+    if (eof_doc && !p->keep_top && p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
         if (p->next.count == 0 && p->top.byte > 0) {
             off_t size = source_size(p->source);
             if (size < 0)
@@ -793,7 +850,7 @@ static int paint(struct pager *p)
     struct frame *old = &p->current;
     struct frame *f = &p->next;
     int first = 0;
-    bool scrolling = old->valid && old->document && f->document &&
+    bool scrolling = !p->redraw && old->valid && old->document && f->document &&
                      old->count && f->count &&
                      (position_equal(f->rows[0], old->rows[0]) ||
                       (p->scroll && position_compare(f->rows[0], old->rows[0]) > 0));
@@ -836,7 +893,13 @@ static int paint(struct pager *p)
 
     if (!final && !p->quit) {
         char line[SEARCH_SIZE + 80];
+        const char *message = p->message;
+        if (eof_doc && !p->following && !message && !has_attention_line(p) &&
+            !p->files[p->file_index].watch_unavailable)
+            p->message = at_last_file ? "End of file (q quit)"
+                                      : "End of file (:n next, q quit)";
         status(p, state, line, sizeof(line));
+        p->message = message;
         if (output(p, line) < 0)
             return -1;
     }
@@ -844,9 +907,14 @@ static int paint(struct pager *p)
     old->count = f->count;
     old->valid = true;
     old->document = f->document;
+    old->at_eof = eof_doc;
+    if (f->document && p->files[p->file_index].named && !p->opts.no_watch)
+        capture_viewport(p);
 
     p->dirty = false;
     p->scroll = false;
+    p->redraw = false;
+    p->keep_top = false;
     p->waiting = state == VIEW_WAIT;
     if (final) {
         old->valid = false; // The prompt line is already clear.
@@ -926,35 +994,42 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
         return;
     if (f->source.spool && f->source.size == 0 && !f->source.eof)
         return;
-    if (f->has_rendered && f->rendered_width == p->width &&
+    if (f->has_rendered && !f->render_stale && f->rendered_width == p->width &&
         (!f->source.spool || f->rendered_size == f->source.size))
         return;
-    if (f->has_rendered) {
-        source_close(&f->rendered);
-        view_styles_free(&f->rendered_styles);
-        view_links_free(&f->rendered_links);
-        f->has_rendered = false;
-        f->rendered_format = VIEW_FORMAT_RAW;
-    }
+    struct source rendered;
+    struct view_styles styles = {0};
+    struct view_links links = {0};
+    enum view_format format;
     bool saved_eof = f->source.eof;
     f->source.eof = true;
     int rc = view_render_source(&f->source, f->path, p->width, p->opts.ascii,
-                                f->force_render, &f->rendered,
-                                &f->rendered_styles, &f->rendered_links,
-                                &f->rendered_format);
+                                f->force_render, &rendered, &styles, &links,
+                                &format);
     f->source.eof = saved_eof;
     if (rc == 0) {
+        if (f->has_rendered) {
+            source_close(&f->rendered);
+            view_styles_free(&f->rendered_styles);
+            view_links_free(&f->rendered_links);
+        }
+        f->rendered = rendered;
+        f->rendered_styles = styles;
+        f->rendered_links = links;
+        f->rendered_format = format;
         f->has_rendered = true;
+        f->render_stale = false;
         f->rendered_width = p->width;
         f->rendered_size = f->source.size;
         invalidate_row_index(f);
     } else {
-        f->render_mode = false;
         snprintf(p->message_buf, sizeof(p->message_buf),
                  "Render failed: %s", strerror(errno));
         p->message = p->message_buf;
     }
 }
+
+static int watch_active_file(struct pager *p, bool switching);
 
 static int switch_file(struct pager *p, size_t target)
 {
@@ -976,15 +1051,16 @@ static int switch_file(struct pager *p, size_t target)
             p->message = "Cannot reopen standard input";
             return -1;
         }
-        int fd = open(dst->path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+        int fd = source_open_file(dst->path);
         if (fd < 0) {
             snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
                      dst->path, strerror(errno));
             p->message = p->message_buf;
             return -1;
         }
-        struct stat st;
-        if (fstat(fd, &st) < 0) {
+        int opened = p->opts.no_watch ? source_snapshot(&dst->source, fd)
+                                     : source_open(&dst->source, fd);
+        if (opened < 0) {
             int err = errno;
             close(fd);
             snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
@@ -992,28 +1068,15 @@ static int switch_file(struct pager *p, size_t target)
             p->message = p->message_buf;
             return -1;
         }
-        if (!S_ISREG(st.st_mode)) {
+        if (p->opts.no_watch) {
             close(fd);
-            int err = S_ISDIR(st.st_mode) ? EISDIR : EINVAL;
-            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
-                     dst->path, strerror(err));
-            p->message = p->message_buf;
-            return -1;
+        } else {
+            dst->fd = fd;
+            dst->own_fd = true;
         }
-        if (source_open(&dst->source, fd) < 0) {
-            int err = errno;
-            close(fd);
-            snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
-                     dst->path, strerror(err));
-            p->message = p->message_buf;
-            return -1;
-        }
-        dst->fd = fd;
-        dst->own_fd = true;
         dst->opened = true;
     }
 
-    ensure_rendered(p, dst);
     p->file_index = target;
     p->source = active_source(dst);
     p->top = dst->top;
@@ -1028,6 +1091,10 @@ static int switch_file(struct pager *p, size_t target)
     p->job = IDLE;
     p->current.valid = false;
     p->dirty = true;
+    if (watch_active_file(p, true) < 0)
+        return -1;
+    ensure_rendered(p, dst);
+    p->source = active_source(dst);
     if (align(p, p->top, &p->top) < 0)
         return -1;
     if (align(p, p->attn, &p->attn) < 0)
@@ -1120,6 +1187,7 @@ static ssize_t find_or_add_file(struct pager *p, const char *path)
     p->files[idx] = (struct file_entry){
         .path = copy,
         .own_path = true,
+        .named = true,
         .fd = -1
     };
     return (ssize_t)idx;
@@ -1580,12 +1648,162 @@ static int last_page(struct pager *p, struct position end)
     return 0;
 }
 
+static bool anchor_matches(struct source *source, off_t offset,
+                           const struct viewport_anchor *anchor)
+{
+    for (size_t i = 0; i < anchor->length; i++) {
+        if (source_byte(source, offset + (off_t)i) != anchor->text[i])
+            return false;
+    }
+    if (anchor->length == sizeof(anchor->text))
+        return true;
+    int after = source_byte(source, offset + (off_t)anchor->length);
+    return after == '\n' || after == VIEW_EOF;
+}
+
+static off_t find_anchor(struct source *source,
+                         const struct viewport_anchor *anchor, off_t size)
+{
+    if (anchor->length == 0 || size == 0)
+        return -1;
+    off_t old = anchor->line_byte;
+    if (old < size && (old == 0 || source_byte(source, old - 1) == '\n') &&
+        anchor_matches(source, old, anchor))
+        return old;
+
+    off_t center = old < size ? old : size - 1;
+    off_t start = size <= ROW_INDEX_MAX_BYTES || center <= ANCHOR_WINDOW
+                  ? 0 : center - ANCHOR_WINDOW;
+    off_t end = size <= ROW_INDEX_MAX_BYTES || size - center <= ANCHOR_WINDOW
+                ? size : center + ANCHOR_WINDOW;
+    off_t best = -1;
+    off_t distance = 0;
+    bool line = start == 0 || source_byte(source, start - 1) == '\n';
+    for (off_t offset = start; offset < end; offset++) {
+        off_t gap = offset < old ? old - offset : offset - old;
+        if (line && (best < 0 || gap < distance) &&
+            anchor_matches(source, offset, anchor)) {
+            best = offset;
+            distance = gap;
+        }
+        int b = source_byte(source, offset);
+        if (b < 0)
+            break;
+        line = b == '\n';
+    }
+    return best;
+}
+
+static int restore_viewport(struct pager *p, const struct viewport_anchor *anchor)
+{
+    off_t size = source_size(p->source);
+    if (size < 0)
+        return -1;
+    if (size == 0) {
+        p->top = (struct position){0};
+        return 0;
+    }
+    off_t match = find_anchor(p->source, anchor, size);
+    if (match >= 0) {
+        off_t offset = anchor->row_offset < size - match ? anchor->row_offset : 0;
+        if (align(p, (struct position){.byte = match + offset}, &p->top) < 0)
+            return -1;
+        return back(p, p->top, anchor->rows_above, &p->top);
+    }
+    if (anchor->display_line) {
+        ensure_row_index(p);
+        struct file_entry *file = &p->files[p->file_index];
+        if (file->row_index_valid && file->row_count) {
+            size_t row = anchor->display_line < file->row_count
+                         ? anchor->display_line : file->row_count;
+            p->top = file->row_index[row - 1];
+            return 0;
+        }
+    }
+    struct position target = p->top;
+    if (target.byte >= size)
+        target = (struct position){.byte = size - 1};
+    return align(p, target, &p->top);
+}
+
+static int watch_active_file(struct pager *p, bool switching)
+{
+    struct file_entry *file = &p->files[p->file_index];
+    if (!file->named || p->opts.no_watch)
+        return 0;
+    bool had_revision = file->watch.sample != NULL;
+    int replacement;
+    int change = watch_check(&file->watch, file->path, file->fd, &replacement);
+    if (change < 0) {
+        if (errno != EAGAIN && !file->watch_unavailable) {
+            file->watch_unavailable = true;
+            p->dirty = true;
+        }
+        return 0;
+    }
+    if (file->watch_unavailable) {
+        file->watch_unavailable = false;
+        p->dirty = true;
+    }
+    if (change == WATCH_UNCHANGED)
+        return 0;
+
+    if (replacement >= 0) {
+        source_close(&file->source);
+        if (file->own_fd)
+            close(file->fd);
+        file->source = (struct source){
+            .input = replacement, .fd = replacement, .eof = true, .block = -1
+        };
+        file->fd = replacement;
+        file->own_fd = true;
+    }
+    file->source.size = file->watch.stat.st_size;
+    file->source.block = -1;
+    file->source.used = 0;
+    // Preserve reads from pseudo-files whose stat size is zero.
+    unsigned char first;
+    file->source.bounded = file->source.size != 0 ||
+                           pread(file->fd, &first, 1, 0) == 0;
+    if (!had_revision)
+        return 0;
+
+    bool tail = p->following || p->job == GO_END || (!switching && change == WATCH_APPEND &&
+                                 p->current.valid && p->current.document &&
+                                 p->current.at_eof);
+    bool rendered = file->render_mode;
+    file->render_stale = true;
+    invalidate_row_index(file);
+    p->message = NULL;
+    ensure_rendered(p, file);
+    p->source = active_source(file);
+    p->job = IDLE;
+    p->search.hit = -1;
+    p->focused_link = -1;
+    free(p->pending_external);
+    p->pending_external = NULL;
+    p->dirty = true;
+    p->redraw = true;
+    if (tail) {
+        p->cursor = (struct position){0};
+        p->job = GO_END;
+        return 0;
+    }
+    p->keep_top = true;
+    if ((change != WATCH_APPEND || rendered) &&
+        restore_viewport(p, &file->anchor) < 0)
+        return -1;
+    p->attn = p->top;
+    catch_link_on_attn(p, 1);
+    return 0;
+}
+
 static int step_job(struct pager *p)
 {
     struct file_entry *cur = &p->files[p->file_index];
     struct source *s = p->source;
     if (p->job == GO_END) {
-        if (!s->eof || !cur->source.eof)
+        if (!p->following && (!s->eof || !cur->source.eof))
             return VIEW_WAIT;
         off_t size = 0;
         if (source_refresh(s, &size) < 0)
@@ -1738,8 +1956,8 @@ static void handle_colon_prompt(struct pager *p, tam_key_event_t key, int c,
 
     if (c == 'n') {
         size_t step = count ? (size_t)count : 1;
-        if (p->file_index >= p->cli_file_count ||
-            p->file_index + step >= p->cli_file_count || count > SIZE_MAX) {
+        if (p->file_index >= p->cli_file_count || count > SIZE_MAX ||
+            step >= p->cli_file_count - p->file_index) {
             p->message = "No next file";
             return;
         }
@@ -1931,7 +2149,8 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->focused_link = -1;
         p->current.valid = false;
         catch_link_on_attn(p, 1);
-        p->message = cur->render_mode ? "Render mode" : "Raw mode";
+        if (!p->message)
+            p->message = cur->render_mode ? "Render mode" : "Raw mode";
         return 0;
     } else if (c == 'C') {
         p->opts.color = !p->opts.color;
@@ -1961,6 +2180,10 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         p->cursor = (struct position){0};
         p->job = GO_END;
     } else if (c == 'F') {
+        if (p->opts.no_watch && p->files[p->file_index].named) {
+            p->message = "Watch disabled (static snapshot)";
+            return 0;
+        }
         save_jump_mark(p);
         p->following = true;
         p->cursor = (struct position){0};
@@ -2076,8 +2299,17 @@ static int poll_keys(struct pager *p)
     return 0;
 }
 
+static int64_t monotonic_ms(void)
+{
+    struct timespec now;
+    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
+        return -1;
+    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+
 static int run(struct pager *p, int wake)
 {
+    int64_t watch_due = 0;
     while (!p->quit) {
         if (interrupted) {
             p->result = 128 + interrupted;
@@ -2093,6 +2325,18 @@ static int run(struct pager *p, int wake)
             resized = 0;
             if (refresh_size(p) < 0)
                 return -1;
+        }
+
+        bool watching = p->files[p->file_index].named && !p->opts.no_watch;
+        if (watching) {
+            int64_t now = monotonic_ms();
+            if (now < 0)
+                return -1;
+            if (now >= watch_due) {
+                watch_due = now + WATCH_INTERVAL_MS;
+                if (watch_active_file(p, false) < 0)
+                    return -1;
+            }
         }
 
         int job_state = VIEW_ROW;
@@ -2135,13 +2379,25 @@ static int run(struct pager *p, int wake)
         bool scanning = p->job != IDLE && job_state != VIEW_WAIT;
         int timeout = scanning ? 0
                     : tam_key_pending(&p->keys) ? 50
-                    : (p->following && !p->source->spool) ? 250 : -1;
+                    : (p->following && !watching && !p->source->spool)
+                      ? WATCH_INTERVAL_MS : -1;
+        bool watch_timeout = false;
+        if (watching) {
+            int64_t now = monotonic_ms();
+            if (now < 0)
+                return -1;
+            int remaining = now < watch_due ? (int)(watch_due - now) : 0;
+            if (timeout < 0 || remaining < timeout) {
+                timeout = remaining;
+                watch_timeout = true;
+            }
+        }
         int n = poll(fds, sizeof(fds) / sizeof(fds[0]), timeout);
         if (n < 0 && errno == EINTR)
             continue;
         if (n < 0)
             return -1;
-        if (n == 0 && !scanning) {
+        if (n == 0 && !scanning && !watch_timeout) {
             if (tam_key_pending(&p->keys)) {
                 int got_key = tam_key_timeout(&p->keys, &key);
                 tam_key_init(&p->keys);
@@ -2155,11 +2411,13 @@ static int run(struct pager *p, int wake)
                     }
                 }
             }
-            if (p->following && !p->source->spool && p->job == IDLE) {
+            if (p->following && !current_file->named && !p->source->spool &&
+                p->job == IDLE) {
                 off_t new_size = 0;
                 if (source_refresh(p->source, &new_size) == 0 &&
                     new_size != p->follow_size) {
                     p->follow_size = new_size;
+                    p->redraw = true;
                     if (new_size < p->top.byte)
                         p->top = (struct position){0};
                     p->job = GO_END;
@@ -2200,6 +2458,7 @@ static int run(struct pager *p, int wake)
                 p->dirty = true;
             }
             if (p->following) {
+                p->redraw = true;
                 p->job = GO_END;
             } else if (p->waiting) {
                 p->dirty = true;
@@ -2251,8 +2510,12 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
     for (size_t i = 0; i < count; i++) {
         files[i].path = inputs[i].path;
         files[i].fd = inputs[i].fd;
+        files[i].named = inputs[i].named;
     }
-    if (source_open(&files[0].source, inputs[0].fd) < 0) {
+    int opened = opts.no_watch && files[0].named
+                 ? source_snapshot(&files[0].source, inputs[0].fd)
+                 : source_open(&files[0].source, inputs[0].fd);
+    if (opened < 0) {
         int err = errno;
         free(files);
         errno = err;
@@ -2299,6 +2562,8 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
 
     if (size_view(&p) == 0 && signal_pipe(wake) == 0 &&
         tam_tty_raw(&p.tty, true) == 0) {
+        if (watch_active_file(&p, true) < 0)
+            goto cleanup;
         ensure_rendered(&p, &p.files[0]);
         p.source = active_source(&p.files[0]);
         catch_link_on_attn(&p, 1);
@@ -2334,6 +2599,7 @@ cleanup:;
             view_links_free(&p.files[i].rendered_links);
         }
         free(p.files[i].row_index);
+        watch_close(&p.files[i].watch);
         if (p.files[i].opened)
             source_close(&p.files[i].source);
         if (p.files[i].own_fd && p.files[i].fd >= 0)

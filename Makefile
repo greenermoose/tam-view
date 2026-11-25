@@ -9,7 +9,7 @@ CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
 CFLAGS ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 LIBTAM ?= $(LIBTAM_PREFIX)/lib/libtam.a
-OBJECTS = $(addprefix $(BUILD)/,main.o source.o layout.o pager.o render.o render_md.o render_html.o render_mermaid.o)
+OBJECTS = $(addprefix $(BUILD)/,main.o source.o watch.o layout.o pager.o render.o render_md.o render_html.o render_mermaid.o)
 RENDER_OBJECTS = $(addprefix $(BUILD)/,render.o render_md.o render_html.o render_mermaid.o)
 
 all: $(BUILD)/tam-view

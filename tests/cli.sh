@@ -9,10 +9,13 @@ cd "$scratch"
 test "$("$bin" --version)" = "tam-view $expected"
 "$bin" --help > help
 grep -F 'Usage: tam-view' help >/dev/null
+grep -F -- '--no-watch' help >/dev/null
 printf 'one\000two\033[2J\r\nthree' > ./-dash
 "$bin" --raw -- -dash > output
 cmp -- -dash output
 "$bin" -r -- -dash > output
+cmp -- -dash output
+"$bin" --no-watch -- -dash > output
 cmp -- -dash output
 "$bin" - < ./-dash > output
 cmp -- -dash output

@@ -6,6 +6,13 @@ file it shows a message and waits for q (pass -E / --quit-at-eof to
 return automatically at EOF). The shell prompt appears on the line
 below the text.
 
+Interactive named files are watched by default. Appends keep the last
+line visible when it was already on screen. Scroll up to read earlier
+lines, then use G or End to return to the last page. Edits refresh the
+view and keep the same text in view where possible. Use --no-watch to
+read a static snapshot taken when each file is first opened. Watch
+mode leaves piped input and redirected output behavior as before.
+
 Follows the tam-idol 1.1.0 standard.
 
 
@@ -52,7 +59,7 @@ KEYS
   :n, :p, :x, :f       Next, previous, first, or current file in list
   R                    Toggle rendered / raw view
   C                    Toggle color and search highlighting
-  F                    Follow growing file or pipe (Ctrl-C stops)
+  F                    Follow growing watched file or pipe (Ctrl-C stops)
   Esc, Ctrl-C          Cancel a search/follow, or clear search highlight
   Ctrl-Z               Suspend and restore the shell's tty settings
   g, h                 Toggle the keybindings guide
