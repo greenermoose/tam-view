@@ -285,6 +285,23 @@ static void test_mermaid(void)
     assert(strstr(out_narrow, "Finish"));
     free(out_narrow);
 
+    // stateDiagram-v2 support (start/end pseudostates, labeled transitions, cycles).
+    const char *sd =
+        "stateDiagram-v2\n"
+        "  [*] --> IDLE\n"
+        "  state \"Chord Builder\" as BUILDING\n"
+        "  IDLE --> BUILDING : Right Alt tap\n"
+        "  BUILDING --> IDLE : Escape\n"
+        "  IDLE --> [*]\n";
+    char *out_sd = render_str(VIEW_FORMAT_MERMAID, sd, 80, true);
+    assert(!strstr(out_sd, "unsupported or invalid"));
+    assert(strstr(out_sd, "| [*] |"));
+    assert(strstr(out_sd, "| IDLE |"));
+    assert(strstr(out_sd, "| Chord Builder |"));
+    assert(strstr(out_sd, "(Right Alt tap)"));
+    assert(strstr(out_sd, "(Escape) > [IDLE]"));
+    free(out_sd);
+
     // Unsupported diagram emits diagnostic + raw fallback.
     char *bad = render_str(VIEW_FORMAT_MERMAID, "sequenceDiagram\nA->>B: Hi\n", 80, true);
     assert(strstr(bad, "unsupported or invalid mermaid diagram"));

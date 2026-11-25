@@ -620,6 +620,151 @@ static bool try_render_lr(struct rbuf *b, struct mgraph *g, int width,
     return true;
 }
 
+static const char *parse_state_ref(const char *p, const char *end,
+                                   struct mgraph *g, bool is_target,
+                                   int *node_out)
+{
+    p = skip_ws(p, end);
+    if (p + 3 <= end && memcmp(p, "[*]", 3) == 0) {
+        const char *id = is_target ? "__state_end__" : "__state_start__";
+        *node_out = mgraph_find_or_add(g, id, "[*]", SHAPE_ROUND);
+        return *node_out >= 0 ? p + 3 : NULL;
+    }
+    const char *id_start = p;
+    while (p < end && (isalnum((unsigned char)*p) || *p == '_' || *p == '-')) {
+        if (*p == '-' && p + 1 < end &&
+            (p[1] == '-' || p[1] == '>' || p[1] == '.'))
+            break;
+        p++;
+    }
+    if (p == id_start)
+        return NULL;
+    size_t id_len = (size_t)(p - id_start);
+    char *id = malloc(id_len + 1);
+    if (!id)
+        return NULL;
+    memcpy(id, id_start, id_len);
+    id[id_len] = '\0';
+    *node_out = mgraph_find_or_add(g, id, NULL, SHAPE_ROUND);
+    free(id);
+    return *node_out >= 0 ? p : NULL;
+}
+
+static void parse_state_line(const char *p, const char *end,
+                             struct mgraph *g, bool *in_note)
+{
+    if (*in_note) {
+        if (strncasecmp(p, "end note", 8) == 0 &&
+            (p + 8 == end || isspace((unsigned char)p[8])))
+            *in_note = false;
+        return;
+    }
+
+    if (strncasecmp(p, "note ", 5) == 0) {
+        // Single-line note has ':'; multi-line note runs until 'end note'.
+        if (!memchr(p, ':', (size_t)(end - p)))
+            *in_note = true;
+        return;
+    }
+
+    if (strncasecmp(p, "direction ", 10) == 0) {
+        const char *d = skip_ws(p + 10, end);
+        if (d + 2 <= end) {
+            if (strncasecmp(d, "LR", 2) == 0) {
+                g->lr = true;
+                g->reverse = false;
+            } else if (strncasecmp(d, "RL", 2) == 0) {
+                g->lr = true;
+                g->reverse = true;
+            } else if (strncasecmp(d, "BT", 2) == 0) {
+                g->lr = false;
+                g->reverse = true;
+            } else if (strncasecmp(d, "TB", 2) == 0 ||
+                       strncasecmp(d, "TD", 2) == 0) {
+                g->lr = false;
+                g->reverse = false;
+            }
+        }
+        return;
+    }
+
+    // state "Display Label" as StateId
+    if (strncasecmp(p, "state ", 6) == 0) {
+        const char *q = skip_ws(p + 6, end);
+        if (q < end && *q == '"') {
+            const char *ls = q + 1;
+            const char *le = ls;
+            while (le < end && *le != '"')
+                le++;
+            if (le < end) {
+                const char *after = skip_ws(le + 1, end);
+                if (after + 3 <= end && strncasecmp(after, "as", 2) == 0 &&
+                    isspace((unsigned char)after[2])) {
+                    const char *ids = skip_ws(after + 2, end);
+                    const char *ide = ids;
+                    while (ide < end &&
+                           (isalnum((unsigned char)*ide) || *ide == '_' || *ide == '-'))
+                        ide++;
+                    if (ide > ids) {
+                        size_t idl = (size_t)(ide - ids);
+                        size_t ll = (size_t)(le - ls);
+                        char *id = malloc(idl + 1);
+                        char *lbl = malloc(ll + 1);
+                        if (id && lbl) {
+                            memcpy(id, ids, idl);
+                            id[idl] = '\0';
+                            memcpy(lbl, ls, ll);
+                            lbl[ll] = '\0';
+                            (void)mgraph_find_or_add(g, id, lbl, SHAPE_ROUND);
+                        }
+                        free(id);
+                        free(lbl);
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    if (strncasecmp(p, "classDef ", 9) == 0 ||
+        strncasecmp(p, "class ", 6) == 0 ||
+        strncasecmp(p, "style ", 6) == 0 ||
+        (p < end && *p == '}'))
+        return;
+
+    // Transition: <src> --> <dst> [: <label>]
+    int src_node = -1;
+    const char *after_src = parse_state_ref(p, end, g, false, &src_node);
+    if (!after_src)
+        return;
+
+    const char *op = skip_ws(after_src, end);
+    if (op + 3 <= end && memcmp(op, "-->", 3) == 0) {
+        int dst_node = -1;
+        const char *after_dst = parse_state_ref(op + 3, end, g, true, &dst_node);
+        if (!after_dst)
+            return;
+        const char *rest = skip_ws(after_dst, end);
+        char *elbl = NULL;
+        if (rest < end && *rest == ':') {
+            const char *ls = skip_ws(rest + 1, end);
+            const char *le = end;
+            while (le > ls && isspace((unsigned char)le[-1]))
+                le--;
+            if (le > ls) {
+                size_t ll = (size_t)(le - ls);
+                elbl = malloc(ll + 1);
+                if (elbl) {
+                    memcpy(elbl, ls, ll);
+                    elbl[ll] = '\0';
+                }
+            }
+        }
+        mgraph_add_edge(g, src_node, dst_node, elbl, false, false, true);
+        free(elbl);
+    }
+}
+
 void render_mermaid(struct rbuf *b, const char *src, size_t len,
                     int width, bool ascii)
 {
@@ -629,6 +774,8 @@ void render_mermaid(struct rbuf *b, const char *src, size_t len,
 
     struct mgraph g = {0};
     bool header_ok = false;
+    bool is_state = false;
+    bool in_note = false;
 
     size_t pos = 0;
     while (pos < len) {
@@ -655,6 +802,16 @@ void render_mermaid(struct rbuf *b, const char *src, size_t len,
                        (p + 5 == end || isspace((unsigned char)p[5]))) {
                 p = skip_ws(p + 5, end);
                 header_ok = true;
+            } else if (strncasecmp(p, "stateDiagram-v2", 15) == 0 &&
+                       (p + 15 == end || isspace((unsigned char)p[15]))) {
+                header_ok = true;
+                is_state = true;
+                continue;
+            } else if (strncasecmp(p, "stateDiagram", 12) == 0 &&
+                       (p + 12 == end || isspace((unsigned char)p[12]))) {
+                header_ok = true;
+                is_state = true;
+                continue;
             } else {
                 size_t ds = b->len;
                 rbuf_puts(b, "[tam-view: unsupported or invalid mermaid diagram]");
@@ -675,6 +832,11 @@ void render_mermaid(struct rbuf *b, const char *src, size_t len,
                     g.reverse = true;
                 }
             }
+            continue;
+        }
+
+        if (is_state) {
+            parse_state_line(p, end, &g, &in_note);
             continue;
         }
 
