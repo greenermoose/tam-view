@@ -4,7 +4,9 @@ LIBTAM_PREFIX ?= $(HOME)/.local
 BUILD ?= build
 VERSION := $(shell cat VERSION)
 
-CPPFLAGS += -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
+# libtam 0.15.0 and later set no feature macros; GNU keeps the C library
+# functions tam-view was built with (C23 strtoul) in every file.
+CPPFLAGS += -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
             -D_FILE_OFFSET_BITS=64 -Iinclude -I$(LIBTAM_PREFIX)/include
 CFLAGS ?= -O2 -g
 override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
