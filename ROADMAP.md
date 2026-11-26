@@ -47,3 +47,10 @@ The document source, layout and Markdown/HTML/Mermaid renderers moved
 into libtam's `libtam-render.a` (libtam 0.13.0), so tam-knox shares one
 copy instead of carrying its own. tam-view links the archive; its
 behaviour is unchanged. The renderer's tests moved to libtam with it.
+
+## 0.4.4 — More of libtam
+
+Ctrl+Z suspends and resumes through libtam (still SIGSTOP, which also
+stops a session leader), the terminal is restored after a crash or an
+exit that skips cleanup, and the clock, output loop and locale setup use
+libtam.

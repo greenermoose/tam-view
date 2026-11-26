@@ -1,5 +1,7 @@
 #include "view.h"
 
+#include <tam_uni.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <locale.h>
@@ -24,14 +26,8 @@ static int copy(int fd)
             continue;
         if (count <= 0)
             return count < 0 ? -1 : 0;
-        for (ssize_t done = 0; done < count;) {
-            ssize_t n = write(STDOUT_FILENO, buf + done, (size_t)(count - done));
-            if (n < 0 && errno == EINTR)
-                continue;
-            if (n <= 0)
-                return -1;
-            done += n;
-        }
+        if (tam_write_all(STDOUT_FILENO, buf, (size_t)count) < 0)
+            return -1;
     }
 }
 
@@ -139,7 +135,7 @@ int main(int argc, char **argv)
     if (file_count == 0)
         inputs[file_count++] = (struct view_input){.path = "-", .fd = -1};
 
-    setlocale(LC_CTYPE, "");
+    tam_locale_init();
     const char *term = getenv("TERM");
     const char *no_color = getenv("NO_COLOR");
     bool env_no_color = no_color && no_color[0] != '\0';

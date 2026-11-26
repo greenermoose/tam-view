@@ -2299,13 +2299,16 @@ static int suspend_view(struct pager *p)
 {
     if (p->current.valid && output(p, "\r\033[K") < 0)
         return -1;
-    if (tam_tty_raw(&p->tty, false) < 0)
+    /* SIGSTOP, not SIGTSTP: a session leader's process group is orphaned,
+     * and the kernel discards SIGTSTP there. tam_tty_resume brings back
+     * exactly the modes we had. */
+    if (tam_tty_suspend(&p->tty) < 0)
         return -1;
     if (raise(SIGSTOP) != 0)
         return -1;
     if (interrupted)
         return 0;
-    if (tam_tty_raw(&p->tty, true) < 0)
+    if (tam_tty_resume(&p->tty) < 0)
         return -1;
     tam_key_init(&p->keys);
     return refresh_size(p);
@@ -2337,10 +2340,7 @@ static int poll_keys(struct pager *p)
 
 static int64_t monotonic_ms(void)
 {
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
-        return -1;
-    return (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    return tam_monotonic_ms();
 }
 
 static int run(struct pager *p, int wake)
@@ -2606,6 +2606,9 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
 
     if (size_view(&p) == 0 && signal_pipe(wake) == 0 &&
         tam_tty_raw(&p.tty, true) == 0) {
+        /* Our signal pipe handles INT, TERM, HUP and QUIT; this covers
+         * crashes and an exit that skips the cleanup below. */
+        (void)tam_tty_install_restore(&p.tty);
         if (watch_active_file(&p, true) < 0)
             goto cleanup;
         ensure_rendered(&p, &p.files[0]);

@@ -1,0 +1,35 @@
+W10 MORE OF LIBTAM (TAM-VIEW 0.4.4)
+
+Date: 2026-11-26
+AI harness: Claude Code 2.1.332
+AI model: claude-opus-5-5
+Continues: W9
+
+
+GUIDANCE
+
+  Fred: "Move each program onto the shared code."
+
+
+DONE
+
+  - Ctrl+Z: tam_tty_suspend, raise(SIGSTOP), tam_tty_resume. SIGSTOP is
+    kept on purpose: tam_tty_job_stop's SIGTSTP is discarded by the
+    kernel when tam-view is a session leader (orphaned process group),
+    which test-pty exercises.
+  - tam_tty_install_restore after raw mode (crashes, exits without
+    cleanup); the signal pipe still handles INT, TERM, HUP and QUIT.
+  - tam_monotonic_ms, tam_write_all for the copy path, tam_locale_init.
+  - No install guard: a viewer may be needed to read during recovery.
+  - make test and make sanitize pass.
+
+
+FAILED
+
+  - tam_tty_job_stop for Ctrl+Z: see above.
+
+
+HANDOFF
+
+  - The signal pipe stays; tam_tty_watch_resize would replace only its
+    SIGWINCH part.

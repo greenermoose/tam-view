@@ -6,7 +6,8 @@ Updated: 2026-11-25, with W8
 
 STATE
 
-  0.4.3 on dev links libtam-render (libtam 0.13.0) for its document
+  0.4.4 on dev moves Ctrl+Z, crash restore, the clock, the output loop
+  and locale setup onto libtam (W10). 0.4.3 links libtam-render (libtam 0.13.0) for its document
   source, layout and renderers (W9). 0.4.2 repeats two displayed rows by
   default on full-page moves.
   --overlap sets the count in both directions. Short pages start at the
