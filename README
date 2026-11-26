@@ -70,7 +70,8 @@ KEYS
   C                    Toggle color and search highlighting
   F                    Follow growing watched file or pipe (Ctrl-C stops)
   Esc, Ctrl-C          Cancel a search/follow, or clear search highlight
-  Ctrl-Z               Suspend and restore the shell's tty settings
+  Ctrl-P               Pause (suspend) and restore the shell's tty settings
+  Ctrl-Z               Undo: nothing to undo in a viewer, so it does nothing
   g, h                 Toggle the keybindings guide
   q                    Quit and keep the visible text
 

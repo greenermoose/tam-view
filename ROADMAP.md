@@ -54,3 +54,9 @@ Ctrl+Z suspends and resumes through libtam (still SIGSTOP, which also
 stops a session leader), the terminal is restored after a crash or an
 exit that skips cleanup, and the clock, output loop and locale setup use
 libtam.
+
+## 0.4.5 — Ctrl+P pauses, Ctrl+Z is Undo
+
+Following the tam-idol keybinding standard: Ctrl+P pauses the viewer
+(Pause, as the shell's VSUSP), and Ctrl+Z, which is Undo everywhere,
+does nothing in a viewer instead of suspending it.

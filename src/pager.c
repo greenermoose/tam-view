@@ -2029,11 +2029,16 @@ static int handle_key(struct pager *p, tam_key_event_t key)
             ? (int)key.codepoint : 0;
     bool ctrl_c = key.type == TAM_KEY_CHAR && key.mods == TAM_MOD_CTRL &&
                   key.codepoint == 'c';
+    /* tam-idol keys: Ctrl+P pauses (as the shell's VSUSP does); Ctrl+Z is
+     * Undo, which a read-only viewer does not have, so it does nothing. */
     if (key.type == TAM_KEY_CHAR && key.mods == TAM_MOD_CTRL &&
-        key.codepoint == 'z') {
+        key.codepoint == 'p') {
         suspended = 1;
         return 0;
     }
+    if (key.type == TAM_KEY_CHAR && key.mods == TAM_MOD_CTRL &&
+        key.codepoint == 'z')
+        return 0;
     if (p->prompt == HELP) {
         if (c == 'q') {
             p->prompt = COMMAND;

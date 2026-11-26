@@ -1,0 +1,32 @@
+W11 CTRL+P PAUSES, CTRL+Z IS UNDO (TAM-VIEW 0.4.5)
+
+Date: 2026-11-26
+AI harness: Claude Code 2.1.332
+AI model: claude-opus-5-5
+Continues: W10
+
+
+GUIDANCE
+
+  Fred: "Ctrl + Z should be undo not kill. Look at the idol keybindings
+  file."
+
+
+DONE
+
+  - tam-idol keys/keybindings.md: Ctrl+Z is Undo everywhere and Ctrl+P is
+    Pause; a key with no meaning on a surface is a no-op. tam-view
+    suspended on Ctrl+Z. Now Ctrl+P suspends (tam_tty_suspend, SIGSTOP,
+    tam_tty_resume) and Ctrl+Z does nothing.
+  - test-pty: Ctrl+Z leaves the viewer running; Ctrl+P stops it. README
+    updated. make test passes.
+
+
+FAILED
+
+  - Nothing.
+
+
+HANDOFF
+
+  - Nothing pending.

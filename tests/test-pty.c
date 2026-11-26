@@ -703,7 +703,12 @@ int main(int argc, char **argv)
     write_file(path, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\n");
     t = start(argv[1], path, -1, -1);
     expect(&t, 3, path);
+    /* Ctrl+Z is Undo (nothing to undo here): the viewer keeps running. */
     send_key(&t, "\032");
+    drain(&t, 200);
+    CHECK(waitpid(t.child, NULL, WNOHANG | WUNTRACED) == 0);
+    /* Ctrl+P pauses. */
+    send_key(&t, "\020");
     CHECK(WIFSTOPPED(wait_child(&t, WUNTRACED)));
     restored(&t);
     CHECK(kill(t.child, SIGCONT) == 0);
