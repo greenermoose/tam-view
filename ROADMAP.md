@@ -60,3 +60,8 @@ libtam.
 Following the tam-idol keybinding standard: Ctrl+P pauses the viewer
 (Pause, as the shell's VSUSP), and Ctrl+Z, which is Undo everywhere,
 does nothing in a viewer instead of suspending it.
+
+## 0.4.6 — Pause through libtam
+
+Ctrl+P pauses through `tam_tty_job_stop` (libtam 0.14.1), which now also
+pauses a session leader; tam-view no longer raises SIGSTOP itself.

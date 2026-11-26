@@ -2304,17 +2304,12 @@ static int suspend_view(struct pager *p)
 {
     if (p->current.valid && output(p, "\r\033[K") < 0)
         return -1;
-    /* SIGSTOP, not SIGTSTP: a session leader's process group is orphaned,
-     * and the kernel discards SIGTSTP there. tam_tty_resume brings back
-     * exactly the modes we had. */
-    if (tam_tty_suspend(&p->tty) < 0)
-        return -1;
-    if (raise(SIGSTOP) != 0)
+    /* Pause, then come back with exactly the modes we had. job_stop also
+     * pauses a session leader, whose SIGTSTP the kernel would discard. */
+    if (tam_tty_job_stop(&p->tty) < 0)
         return -1;
     if (interrupted)
         return 0;
-    if (tam_tty_resume(&p->tty) < 0)
-        return -1;
     tam_key_init(&p->keys);
     return refresh_size(p);
 }

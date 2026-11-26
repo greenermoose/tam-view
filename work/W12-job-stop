@@ -1,0 +1,24 @@
+W12 PAUSE THROUGH LIBTAM (TAM-VIEW 0.4.6)
+
+Date: 2026-11-26
+AI harness: Claude Code 2.1.332
+AI model: claude-opus-5-5
+Continues: W11
+
+
+GUIDANCE
+
+  Fred: "Fix the libtam bug."
+
+
+DONE
+
+  - libtam 0.14.1's tam_tty_job_stop pauses a session leader too, so
+    suspend_view calls it instead of tam_tty_suspend, raise(SIGSTOP) and
+    tam_tty_resume. The Makefile requires libtam 0.14.1. test-pty, which
+    pauses tam-view as a session leader, passes.
+
+
+FAILED
+
+  - Nothing.

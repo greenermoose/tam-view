@@ -6,7 +6,8 @@ Updated: 2026-11-25, with W8
 
 STATE
 
-  0.4.5 on dev: Ctrl+P pauses and Ctrl+Z (Undo) is a no-op (W11). 0.4.4
+  0.4.6 on dev: pause goes through libtam 0.14.1's tam_tty_job_stop
+  (W12). 0.4.5: Ctrl+P pauses and Ctrl+Z (Undo) is a no-op (W11). 0.4.4
   moves Ctrl+Z, crash restore, the clock, the output loop
   and locale setup onto libtam (W10). 0.4.3 links libtam-render (libtam 0.13.0) for its document
   source, layout and renderers (W9). 0.4.2 repeats two displayed rows by
