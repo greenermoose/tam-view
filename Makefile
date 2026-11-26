@@ -9,7 +9,7 @@ VERSION := $(shell cat VERSION)
 CPPFLAGS += -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -D_XOPEN_SOURCE=700 \
             -D_FILE_OFFSET_BITS=64 -Iinclude -I$(LIBTAM_PREFIX)/include
 CFLAGS ?= -O2 -g
-override CFLAGS += -std=c11 -Wall -Wextra -Wpedantic -Wshadow -Wvla
+override CFLAGS += -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wvla
 # The document source, layout and renderers are libtam-render (libtam 0.13.0),
 # linked before libtam.
 LIBTAM ?= $(LIBTAM_PREFIX)/lib/libtam-render.a $(LIBTAM_PREFIX)/lib/libtam.a
