@@ -1,0 +1,38 @@
+W9 RENDERER IN LIBTAM (TAM-VIEW 0.4.3)
+
+Date: 2026-11-26
+AI harness: Claude Code 2.1.332
+AI model: claude-opus-5-5
+Continues: W8
+
+
+GUIDANCE
+
+  Fred: "Do 0.13.0" (libtam's plan P1: move tam-view's renderer into
+  libtam-render.a and delete the copies).
+
+
+DONE
+
+  - Moved src/source.c, src/layout.c, src/render*.c,
+    include/render_internal.h, the renderer part of include/view.h and
+    tests/test-layout.c and tests/test-render.c into libtam (src/render,
+    include/tam_render.h, tests/test_render*.c), from tam-view 3444bb1.
+  - Renamed on the way: source_ to tam_source_, position_ to
+    tam_position_, view_ (layout, styles, links, formats) to tam_render_,
+    VIEW_ROW/EOF/WAIT/ERROR to TAM_RENDER_*, VIEW_BLOCK to
+    TAM_SOURCE_BLOCK. view.h keeps only tam-view's own interfaces.
+  - The Makefile links libtam-render.a before libtam.a and requires libtam
+    0.13.0. make test and make sanitize pass.
+
+
+FAILED
+
+  - Nothing.
+
+
+HANDOFF
+
+  - Renderer bugs and review findings now belong to libtam. R1's open
+    findings on src/render.c, src/render_html.c and src/source.c refer to
+    code that is now in libtam/src/render.

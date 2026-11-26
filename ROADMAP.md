@@ -39,3 +39,11 @@ plus optional OSC 8 terminal hyperlinks on capable terminals.
 Full-page navigation repeats two displayed rows by default. Set the
 count in both directions with `--overlap`. Short files and short final
 pages start at the top of the terminal, with the footer at the bottom.
+
+
+## 0.4.3 — Renderer in libtam
+
+The document source, layout and Markdown/HTML/Mermaid renderers moved
+into libtam's `libtam-render.a` (libtam 0.13.0), so tam-knox shares one
+copy instead of carrying its own. tam-view links the archive; its
+behaviour is unchanged. The renderer's tests moved to libtam with it.

@@ -6,7 +6,9 @@ Updated: 2026-11-25, with W8
 
 STATE
 
-  0.4.2 on dev repeats two displayed rows by default on full-page moves.
+  0.4.3 on dev links libtam-render (libtam 0.13.0) for its document
+  source, layout and renderers (W9). 0.4.2 repeats two displayed rows by
+  default on full-page moves.
   --overlap sets the count in both directions. Short pages start at the
   top with blank rows below the text. W8 records verification.
 

@@ -5,7 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
-#define SAMPLE_HALF (VIEW_BLOCK / 2)
+#define SAMPLE_HALF (TAM_SOURCE_BLOCK / 2)
 
 static bool same_file(const struct stat *a, const struct stat *b)
 {
@@ -41,7 +41,7 @@ static int read_bytes(int fd, unsigned char *out, size_t count, off_t offset)
 
 static int sample_file(int fd, off_t size, unsigned char *out)
 {
-    if (size <= VIEW_BLOCK)
+    if (size <= TAM_SOURCE_BLOCK)
         return read_bytes(fd, out, (size_t)size, 0);
     if (read_bytes(fd, out, SAMPLE_HALF, 0) < 0)
         return -1;
@@ -61,7 +61,7 @@ int watch_check(struct file_watch *watch, const char *path, int fd,
         return -1;
     int candidate = -1;
     if (!same_file(&before, &path_stat)) {
-        candidate = source_open_file(path);
+        candidate = tam_source_open_file(path);
         if (candidate < 0)
             return -1;
         fd = candidate;
@@ -70,7 +70,7 @@ int watch_check(struct file_watch *watch, const char *path, int fd,
     }
 
     int change = WATCH_REWRITE;
-    unsigned char sample[VIEW_BLOCK];
+    unsigned char sample[TAM_SOURCE_BLOCK];
     if (watch->sample && same_file(&watch->stat, &before) &&
         before.st_size > watch->stat.st_size) {
         if (sample_file(fd, watch->stat.st_size, sample) < 0)
@@ -85,12 +85,12 @@ int watch_check(struct file_watch *watch, const char *path, int fd,
         goto failed;
     }
     if (!watch->sample) {
-        watch->sample = malloc(VIEW_BLOCK);
+        watch->sample = malloc(TAM_SOURCE_BLOCK);
         if (!watch->sample)
             goto failed;
     }
-    watch->sample_size = before.st_size < VIEW_BLOCK
-                         ? (size_t)before.st_size : VIEW_BLOCK;
+    watch->sample_size = before.st_size < TAM_SOURCE_BLOCK
+                         ? (size_t)before.st_size : TAM_SOURCE_BLOCK;
     memcpy(watch->sample, sample, watch->sample_size);
     watch->stat = before;
     *replacement = candidate;

@@ -43,7 +43,7 @@ enum prompt {
 };
 
 struct frame {
-    struct position rows[MAX_ROWS];
+    struct tam_position rows[MAX_ROWS];
     char *text;
     size_t stride;
     int count;
@@ -55,14 +55,14 @@ struct frame {
 struct mark {
     bool set;
     size_t file;
-    struct position pos;
+    struct tam_position pos;
     int h_offset;
 };
 
 struct nav_entry {
     size_t file_index;
-    struct position top;
-    struct position attn;
+    struct tam_position top;
+    struct tam_position attn;
     int h_offset;
     bool render_mode;
 };
@@ -83,11 +83,11 @@ struct file_entry {
     bool watch_unavailable;
     struct file_watch watch;
     struct viewport_anchor anchor;
-    struct source source;
-    struct source rendered;
-    struct view_styles rendered_styles;
-    struct view_links rendered_links;
-    enum view_format rendered_format;
+    struct tam_source source;
+    struct tam_source rendered;
+    struct tam_render_styles rendered_styles;
+    struct tam_render_links rendered_links;
+    enum tam_render_format rendered_format;
     bool has_rendered;
     bool render_stale;
     int rendered_width;
@@ -98,12 +98,12 @@ struct file_entry {
     int fd;
     bool opened;
     bool own_fd;
-    struct position top;
-    struct position attn;
+    struct tam_position top;
+    struct tam_position attn;
     int h_offset;
-    struct position page_top;
+    struct tam_position page_top;
     bool page_top_valid;
-    struct position *row_index;
+    struct tam_position *row_index;
     size_t row_count;
     size_t row_cap;
     bool row_index_valid;
@@ -127,7 +127,7 @@ struct search {
 };
 
 struct pager {
-    struct source *source;
+    struct tam_source *source;
     struct file_entry *files;
     size_t file_count;
     size_t file_cap;
@@ -137,10 +137,10 @@ struct pager {
     tam_key_parser_t keys;
     struct frame current;
     struct frame next;
-    struct position top;
-    struct position attn;
-    struct position cursor;
-    struct position page_target;
+    struct tam_position top;
+    struct tam_position attn;
+    struct tam_position cursor;
+    struct tam_position page_target;
     ssize_t focused_link;
     int help_offset;
     struct nav_entry *history;
@@ -232,14 +232,14 @@ static int cursor_move(struct pager *p, int n, char direction)
     return output(p, sequence);
 }
 
-static off_t line_start(struct source *s, off_t p)
+static off_t line_start(struct tam_source *s, off_t p)
 {
     while (p > 0) {
-        int b = source_byte(s, p - 1);
+        int b = tam_source_byte(s, p - 1);
         if (b == '\n')
             break;
         if (b < 0)
-            return b == VIEW_ERROR ? -1 : p;
+            return b == TAM_RENDER_ERROR ? -1 : p;
         p--;
     }
     return p;
@@ -247,10 +247,10 @@ static off_t line_start(struct source *s, off_t p)
 
 // Walk only the physical lines needed for this movement. For a wrapped
 // line, a ring keeps the last requested row starts in bounded memory.
-static int back(struct pager *p, struct position end, int count,
-                struct position *out)
+static int back(struct pager *p, struct tam_position end, int count,
+                struct tam_position *out)
 {
-    struct position starts[MAX_ROWS];
+    struct tam_position starts[MAX_ROWS];
     while ((end.byte || end.tab_left) && count > 0) {
         off_t offset = line_start(p->source, end.byte);
         if (offset < 0)
@@ -261,16 +261,16 @@ static int back(struct pager *p, struct position end, int count,
                 return -1;
         }
 
-        struct position row = {.byte = offset};
+        struct tam_position row = {.byte = offset};
         int next_slot = 0;
         int saved = 0;
-        while (position_compare(row, end) < 0) {
-            struct position next;
-            int result = view_row_h(p->source, row, p->width,
+        while (tam_position_compare(row, end) < 0) {
+            struct tam_position next;
+            int result = tam_render_row_h(p->source, row, p->width,
                                     p->h_offset, p->chop, NULL, &next);
-            if (result == VIEW_ERROR)
+            if (result == TAM_RENDER_ERROR)
                 return -1;
-            if (result != VIEW_ROW)
+            if (result != TAM_RENDER_ROW)
                 break;
             starts[next_slot] = row;
             next_slot = (next_slot + 1) % count;
@@ -283,29 +283,29 @@ static int back(struct pager *p, struct position end, int count,
             return 0;
         }
         count -= saved;
-        end = (struct position){.byte = offset};
+        end = (struct tam_position){.byte = offset};
     }
     *out = end;
     return 0;
 }
 
-static int align(struct pager *p, struct position target, struct position *out)
+static int align(struct pager *p, struct tam_position target, struct tam_position *out)
 {
     off_t offset = line_start(p->source, target.byte);
     if (offset < 0)
         return -1;
-    struct position row = {.byte = offset};
+    struct tam_position row = {.byte = offset};
     if (p->h_offset > 0 || p->chop) {
         *out = row;
         return 0;
     }
-    while (position_compare(row, target) < 0) {
-        struct position next;
-        int result = view_row_h(p->source, row, p->width,
+    while (tam_position_compare(row, target) < 0) {
+        struct tam_position next;
+        int result = tam_render_row_h(p->source, row, p->width,
                                 p->h_offset, p->chop, NULL, &next);
-        if (result == VIEW_ERROR)
+        if (result == TAM_RENDER_ERROR)
             return -1;
-        if (result != VIEW_ROW || position_compare(next, target) > 0)
+        if (result != TAM_RENDER_ROW || tam_position_compare(next, target) > 0)
             break;
         row = next;
     }
@@ -320,7 +320,7 @@ static int size_view(struct pager *p)
     int height = rows > 1 ? rows - 1 : 1;
     p->height = height < MAX_ROWS ? height : MAX_ROWS;
     p->width = cols < MAX_COLUMNS ? cols : MAX_COLUMNS;
-    size_t stride = view_row_styled_capacity(p->width);
+    size_t stride = tam_render_row_styled_capacity(p->width);
     char *text = realloc(p->next.text, (size_t)p->height * stride);
     if (!text)
         return -1;
@@ -339,12 +339,12 @@ static int read_logical_line(struct pager *p, off_t start,
                              size_t *out_len, off_t *next_line);
 
 static void collect_line_matches(struct pager *p, off_t ls,
-                                 struct view_styles *out)
+                                 struct tam_render_styles *out)
 {
     out->count = 0;
     size_t len = 0;
     off_t next_line = 0;
-    if (read_logical_line(p, ls, &len, &next_line) != VIEW_ROW)
+    if (read_logical_line(p, ls, &len, &next_line) != TAM_RENDER_ROW)
         return;
     const char *line = p->search.line;
     size_t pos = 0;
@@ -359,8 +359,8 @@ static void collect_line_matches(struct pager *p, off_t ls,
             off_t abs_s = ls + (off_t)ms;
             off_t abs_e = ls + (off_t)me;
             unsigned char st = (p->search.hit >= 0 && abs_s == p->search.hit)
-                               ? VIEW_STYLE_SEARCH_CUR : VIEW_STYLE_SEARCH;
-            if (!view_styles_push(out, abs_s, abs_e, st))
+                               ? TAM_RENDER_STYLE_SEARCH_CUR : TAM_RENDER_STYLE_SEARCH;
+            if (!tam_render_styles_push(out, abs_s, abs_e, st))
                 break;
             pos = me;
         } else {
@@ -373,11 +373,11 @@ static bool has_attention_line(const struct pager *p)
 {
     const struct file_entry *cur = &p->files[p->file_index];
     return cur->render_mode && cur->has_rendered &&
-           (cur->rendered_format == VIEW_FORMAT_MARKDOWN ||
-            cur->rendered_format == VIEW_FORMAT_HTML);
+           (cur->rendered_format == TAM_RENDER_FORMAT_MARKDOWN ||
+            cur->rendered_format == TAM_RENDER_FORMAT_HTML);
 }
 
-static const struct view_links *active_links(const struct pager *p)
+static const struct tam_render_links *active_links(const struct pager *p)
 {
     const struct file_entry *cur = &p->files[p->file_index];
     return (cur->render_mode && cur->has_rendered &&
@@ -412,23 +412,23 @@ static void ensure_row_index(struct pager *p)
     cur->row_index_valid = false;
     if (!p->source->eof || !cur->source.eof)
         return;
-    off_t sz = source_size(p->source);
+    off_t sz = tam_source_size(p->source);
     if (sz < 0 || sz > ROW_INDEX_MAX_BYTES)
         return;
 
     cur->row_count = 0;
-    struct position pos = {0};
+    struct tam_position pos = {0};
     for (;;) {
-        struct position next;
-        int r = view_row_h(p->source, pos, p->width, p->h_offset, p->chop,
+        struct tam_position next;
+        int r = tam_render_row_h(p->source, pos, p->width, p->h_offset, p->chop,
                            NULL, &next);
-        if (r == VIEW_EOF)
+        if (r == TAM_RENDER_EOF)
             break;
-        if (r != VIEW_ROW)
+        if (r != TAM_RENDER_ROW)
             return;
         if (cur->row_count == cur->row_cap) {
             size_t ncap = cur->row_cap ? cur->row_cap * 2 : 128;
-            struct position *grown = realloc(cur->row_index, ncap * sizeof(*grown));
+            struct tam_position *grown = realloc(cur->row_index, ncap * sizeof(*grown));
             if (!grown)
                 return;
             cur->row_index = grown;
@@ -444,14 +444,14 @@ static void ensure_row_index(struct pager *p)
     cur->row_index_valid = true;
 }
 
-static size_t row_index_lookup(const struct file_entry *cur, struct position pos)
+static size_t row_index_lookup(const struct file_entry *cur, struct tam_position pos)
 {
     if (!cur->row_index_valid || cur->row_count == 0)
         return 0;
     size_t lo = 0, hi = cur->row_count;
     while (lo < hi) {
         size_t mid = lo + (hi - lo) / 2;
-        if (position_compare(cur->row_index[mid], pos) < 0)
+        if (tam_position_compare(cur->row_index[mid], pos) < 0)
             lo = mid + 1;
         else
             hi = mid;
@@ -461,21 +461,21 @@ static size_t row_index_lookup(const struct file_entry *cur, struct position pos
     return cur->row_count;
 }
 
-static bool row_byte_range(struct pager *p, struct position row,
+static bool row_byte_range(struct pager *p, struct tam_position row,
                            off_t *start_out, off_t *end_out)
 {
-    struct position next;
-    if (view_row_h(p->source, row, p->width, p->h_offset, p->chop,
-                   NULL, &next) != VIEW_ROW)
+    struct tam_position next;
+    if (tam_render_row_h(p->source, row, p->width, p->h_offset, p->chop,
+                   NULL, &next) != TAM_RENDER_ROW)
         return false;
     *start_out = row.byte;
     *end_out = next.byte;
     return true;
 }
 
-static ssize_t find_link_on_row(struct pager *p, struct position row, bool last)
+static ssize_t find_link_on_row(struct pager *p, struct tam_position row, bool last)
 {
-    const struct view_links *lk = active_links(p);
+    const struct tam_render_links *lk = active_links(p);
     if (!lk || lk->span_count == 0)
         return -1;
     off_t rs = 0, re = 0;
@@ -501,7 +501,7 @@ static ssize_t find_link_on_row(struct pager *p, struct position row, bool last)
 
 static bool step_link_on_row(struct pager *p, int dir)
 {
-    const struct view_links *lk = active_links(p);
+    const struct tam_render_links *lk = active_links(p);
     if (!lk || lk->span_count == 0)
         return false;
     off_t rs = 0, re = 0;
@@ -559,7 +559,7 @@ static void catch_link_on_attn(struct pager *p, int dir)
 
 static void restore_link_on_attn(struct pager *p, ssize_t previous_link)
 {
-    const struct view_links *links = active_links(p);
+    const struct tam_render_links *links = active_links(p);
     off_t start, end;
     if (links && previous_link >= 0 && (size_t)previous_link < links->count &&
         row_byte_range(p, p->attn, &start, &end)) {
@@ -600,7 +600,7 @@ static const char *const HELP_LINES[] = {
 };
 #define HELP_LINE_COUNT (sizeof(HELP_LINES) / sizeof(HELP_LINES[0]))
 
-static int build_page(struct pager *p, struct position *end)
+static int build_page(struct pager *p, struct tam_position *end)
 {
     struct frame *f = &p->next;
     f->count = 0;
@@ -616,26 +616,26 @@ static int build_page(struct pager *p, struct position *end)
             p->help_offset = max_off;
         for (size_t i = (size_t)p->help_offset;
              i < HELP_LINE_COUNT && f->count < p->height; i++, f->count++) {
-            view_label(f->text + f->count * f->stride, f->stride,
+            tam_render_label(f->text + f->count * f->stride, f->stride,
                        p->width, HELP_LINES[i]);
         }
-        return VIEW_ROW;
+        return TAM_RENDER_ROW;
     }
 
     struct file_entry *cur = &p->files[p->file_index];
-    const struct view_styles *doc_st =
+    const struct tam_render_styles *doc_st =
         (p->opts.color && cur->render_mode && cur->has_rendered)
         ? &cur->rendered_styles : NULL;
-    const struct view_links *lk = active_links(p);
+    const struct tam_render_links *lk = active_links(p);
     bool attn_mode = has_attention_line(p);
     bool want_osc8 = lk && active_osc8(p);
     bool want_search = p->opts.color && p->search.valid && p->search.highlight;
-    struct view_styles line_matches = {0};
+    struct tam_render_styles line_matches = {0};
     off_t cached_ls = -1;
-    int rc = VIEW_ROW;
+    int rc = TAM_RENDER_ROW;
 
     for (; f->count < p->height; f->count++) {
-        struct position row = *end;
+        struct tam_position row = *end;
         f->rows[f->count] = row;
         if (want_search) {
             off_t ls = line_start(p->source, row.byte);
@@ -644,8 +644,8 @@ static int build_page(struct pager *p, struct position *end)
                 cached_ls = ls;
             }
         }
-        bool is_attn = attn_mode && p->opts.color && position_equal(row, p->attn);
-        struct view_row_style rs = {
+        bool is_attn = attn_mode && p->opts.color && tam_position_equal(row, p->attn);
+        struct tam_render_row_style rs = {
             .doc_spans = doc_st ? doc_st->spans : NULL,
             .doc_count = doc_st ? doc_st->count : 0,
             .search_spans = want_search ? line_matches.spans : NULL,
@@ -656,26 +656,26 @@ static int build_page(struct pager *p, struct position *end)
             .linux_vt = p->opts.linux_vt,
             .osc8 = want_osc8
         };
-        const struct view_row_style *rsp =
+        const struct tam_render_row_style *rsp =
             (rs.doc_count > 0 || rs.search_count > 0 || rs.attention ||
              (rs.links && (rs.focused_link >= 0 || rs.osc8))) ? &rs : NULL;
-        int result = view_row_styled(p->source, row, p->width,
+        int result = tam_render_row_styled(p->source, row, p->width,
                                      p->h_offset, p->chop, rsp,
                                      f->text + f->count * f->stride, end);
-        if (result != VIEW_ROW) {
+        if (result != TAM_RENDER_ROW) {
             rc = result;
             goto done;
         }
     }
     if (end->tab_left) {
-        rc = VIEW_ROW;
+        rc = TAM_RENDER_ROW;
         goto done;
     }
-    int b = source_byte(p->source, end->byte);
-    rc = b < 0 ? b : VIEW_ROW;
+    int b = tam_source_byte(p->source, end->byte);
+    rc = b < 0 ? b : TAM_RENDER_ROW;
 
 done:
-    view_styles_free(&line_matches);
+    tam_render_styles_free(&line_matches);
     return rc;
 }
 
@@ -701,7 +701,7 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
         message = "File unavailable (waiting for it to return)";
     } else if (!message && p->following) {
         message = "Waiting for data... (Ctrl-C to stop, q to quit)";
-    } else if (!message && (page_state == VIEW_WAIT || p->job != IDLE)) {
+    } else if (!message && (page_state == TAM_RENDER_WAIT || p->job != IDLE)) {
         message = "Waiting for input... (q quits)";
     } else if (!message && p->count) {
         snprintf(text, sizeof(text), "%ju", (uintmax_t)p->count);
@@ -736,14 +736,14 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
             bot_line = (size_t)p->next.count;
             attn_line = 1;
             for (int i = 0; i < p->next.count; i++) {
-                if (position_equal(p->next.rows[i], p->attn)) {
+                if (tam_position_equal(p->next.rows[i], p->attn)) {
                     attn_line = (size_t)i + 1;
                     break;
                 }
             }
         }
 
-        const struct view_links *lk = active_links(p);
+        const struct tam_render_links *lk = active_links(p);
         const char *hint = (has_attention_line(p) && lk &&
                             p->focused_link >= 0 &&
                             (size_t)p->focused_link < lk->count)
@@ -770,9 +770,9 @@ static void status(struct pager *p, int page_state, char *out, size_t cap)
         const char *tail = message + (len > (size_t)width ? len - (size_t)width : 0);
         while ((*tail & 0xc0) == 0x80)
             tail++;
-        view_label(out, cap, width, tail);
+        tam_render_label(out, cap, width, tail);
     } else {
-        view_label(out, cap, p->width, message);
+        tam_render_label(out, cap, p->width, message);
     }
 }
 
@@ -785,7 +785,7 @@ static void capture_viewport(struct pager *p)
         return;
     // The footer already indexes ordinary pages. Keep tail updates
     // on large raw logs from indexing everything just to save an anchor.
-    if (file->render_mode || source_size(p->source) <= VIEW_BLOCK)
+    if (file->render_mode || tam_source_size(p->source) <= TAM_SOURCE_BLOCK)
         ensure_row_index(p);
     anchor->display_line = row_index_lookup(file, p->next.rows[0]);
     off_t previous = -1;
@@ -797,7 +797,7 @@ static void capture_viewport(struct pager *p)
         size_t length = 0;
         bool text = false;
         for (; length < sizeof(anchor->text); length++) {
-            int b = source_byte(p->source, start + (off_t)length);
+            int b = tam_source_byte(p->source, start + (off_t)length);
             if (b < 0 || b == '\n')
                 break;
             anchor->text[length] = (unsigned char)b;
@@ -815,47 +815,47 @@ static void capture_viewport(struct pager *p)
 
 static int paint(struct pager *p)
 {
-    struct position end;
+    struct tam_position end;
     int state = build_page(p, &end);
-    if (state == VIEW_ERROR)
+    if (state == TAM_RENDER_ERROR)
         return -1;
     bool at_last_file = p->file_index >= p->cli_file_count ||
                         p->file_index + 1 >= p->cli_file_count;
-    bool eof_doc = state == VIEW_EOF && p->next.document;
+    bool eof_doc = state == TAM_RENDER_EOF && p->next.document;
     bool final = p->opts.quit_at_eof && eof_doc && !p->following &&
                  !p->hold_eof && at_last_file;
     struct file_entry *file = &p->files[p->file_index];
-    if (p->next.document && !position_equal(file->page_top, p->top))
+    if (p->next.document && !tam_position_equal(file->page_top, p->top))
         file->page_top_valid = false;
     if (eof_doc && !p->keep_top && !file->page_top_valid &&
         p->next.count < p->height && (p->top.byte || p->top.tab_left)) {
         if (p->next.count == 0 && p->top.byte > 0) {
-            off_t size = source_size(p->source);
+            off_t size = tam_source_size(p->source);
             if (size < 0)
                 return -1;
             if (end.byte > size)
-                end = (struct position){.byte = size};
+                end = (struct tam_position){.byte = size};
         }
         if (back(p, end, p->height, &p->top) < 0 ||
-            build_page(p, &end) == VIEW_ERROR)
+            build_page(p, &end) == TAM_RENDER_ERROR)
             return -1;
     }
 
     if (has_attention_line(p) && p->next.document && p->next.count > 0) {
         bool in_view = false;
         for (int i = 0; i < p->next.count; i++) {
-            if (position_equal(p->next.rows[i], p->attn)) {
+            if (tam_position_equal(p->next.rows[i], p->attn)) {
                 in_view = true;
                 break;
             }
         }
         if (!in_view) {
-            if (position_compare(p->attn, p->next.rows[0]) < 0)
+            if (tam_position_compare(p->attn, p->next.rows[0]) < 0)
                 p->attn = p->next.rows[0];
             else
                 p->attn = p->next.rows[p->next.count - 1];
             catch_link_on_attn(p, 1);
-            if (build_page(p, &end) == VIEW_ERROR)
+            if (build_page(p, &end) == TAM_RENDER_ERROR)
                 return -1;
         }
     }
@@ -867,11 +867,11 @@ static int paint(struct pager *p)
     int first = 0;
     bool scrolling = !p->redraw && old->valid && old->document && f->document &&
                      body_rows > 0 && old->count == body_rows && f->count > 0 &&
-                     (position_equal(f->rows[0], old->rows[0]) ||
-                      (p->scroll && position_compare(f->rows[0], old->rows[0]) > 0));
+                     (tam_position_equal(f->rows[0], old->rows[0]) ||
+                      (p->scroll && tam_position_compare(f->rows[0], old->rows[0]) > 0));
     if (scrolling) {
         for (int i = 0; i < old->count; i++) {
-            if (position_equal(old->rows[i], f->rows[0])) {
+            if (tam_position_equal(old->rows[i], f->rows[0])) {
                 first = old->count - i;
                 break;
             }
@@ -922,7 +922,7 @@ static int paint(struct pager *p)
     p->scroll = false;
     p->redraw = false;
     p->keep_top = false;
-    p->waiting = state == VIEW_WAIT;
+    p->waiting = state == TAM_RENDER_WAIT;
     if (final) {
         if (single_row && output(p, "\r\n") < 0)
             return -1;
@@ -953,12 +953,12 @@ static int mark_index(int c)
     return -1;
 }
 
-static struct source *active_source(struct file_entry *f)
+static struct tam_source *active_source(struct file_entry *f)
 {
     return (f->render_mode && f->has_rendered) ? &f->rendered : &f->source;
 }
 
-static int pump_ready_source(struct source *s)
+static int pump_ready_source(struct tam_source *s)
 {
     while (s->spool && !s->eof) {
         struct pollfd fd = {.fd = s->input, .events = POLLIN};
@@ -969,7 +969,7 @@ static int pump_ready_source(struct source *s)
             return -1;
         if (ready == 0)
             break;
-        if (source_pump(s) < 0)
+        if (tam_source_pump(s) < 0)
             return -1;
     }
     return 0;
@@ -994,8 +994,8 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
             if (f->source.spool && f->source.size == 0 && !f->source.eof)
                 return;
             f->render_inited = true;
-            enum view_format fmt = view_detect_format(f->path, &f->source, false);
-            f->render_mode = (fmt != VIEW_FORMAT_RAW);
+            enum tam_render_format fmt = tam_render_detect_format(f->path, &f->source, false);
+            f->render_mode = (fmt != TAM_RENDER_FORMAT_RAW);
             f->force_render = false;
         }
     }
@@ -1006,21 +1006,21 @@ static void ensure_rendered(struct pager *p, struct file_entry *f)
     if (f->has_rendered && !f->render_stale && f->rendered_width == p->width &&
         (!f->source.spool || f->rendered_size == f->source.size))
         return;
-    struct source rendered;
-    struct view_styles styles = {0};
-    struct view_links links = {0};
-    enum view_format format;
+    struct tam_source rendered;
+    struct tam_render_styles styles = {0};
+    struct tam_render_links links = {0};
+    enum tam_render_format format;
     bool saved_eof = f->source.eof;
     f->source.eof = true;
-    int rc = view_render_source(&f->source, f->path, p->width, p->opts.ascii,
+    int rc = tam_render_source(&f->source, f->path, p->width, p->opts.ascii,
                                 f->force_render, &rendered, &styles, &links,
                                 &format);
     f->source.eof = saved_eof;
     if (rc == 0) {
         if (f->has_rendered) {
-            source_close(&f->rendered);
-            view_styles_free(&f->rendered_styles);
-            view_links_free(&f->rendered_links);
+            tam_source_close(&f->rendered);
+            tam_render_styles_free(&f->rendered_styles);
+            tam_render_links_free(&f->rendered_links);
         }
         f->rendered = rendered;
         f->rendered_styles = styles;
@@ -1060,15 +1060,15 @@ static int switch_file(struct pager *p, size_t target)
             p->message = "Cannot reopen standard input";
             return -1;
         }
-        int fd = source_open_file(dst->path);
+        int fd = tam_source_open_file(dst->path);
         if (fd < 0) {
             snprintf(p->message_buf, sizeof(p->message_buf), "%s: %s",
                      dst->path, strerror(errno));
             p->message = p->message_buf;
             return -1;
         }
-        int opened = p->opts.no_watch ? source_snapshot(&dst->source, fd)
-                                     : source_open(&dst->source, fd);
+        int opened = p->opts.no_watch ? tam_source_snapshot(&dst->source, fd)
+                                     : tam_source_open(&dst->source, fd);
         if (opened < 0) {
             int err = errno;
             close(fd);
@@ -1145,7 +1145,7 @@ static int jump_to_anchor(struct pager *p, const char *frag, bool record_history
         return 0;
     }
     const char *decoded = frag;
-    const struct view_links *lk = &cur->rendered_links;
+    const struct tam_render_links *lk = &cur->rendered_links;
     for (size_t i = 0; i < lk->anchor_count; i++) {
         if (strcasecmp(lk->anchors[i].id, decoded) == 0) {
             if (record_history && !push_history(p)) {
@@ -1153,7 +1153,7 @@ static int jump_to_anchor(struct pager *p, const char *frag, bool record_history
                 return 0;
             }
             save_jump_mark(p);
-            struct position target = {.byte = lk->anchors[i].byte};
+            struct tam_position target = {.byte = lk->anchors[i].byte};
             if (align(p, target, &p->top) < 0)
                 return -1;
             p->attn = p->top;
@@ -1204,7 +1204,7 @@ static ssize_t find_or_add_file(struct pager *p, const char *path)
 
 static int follow_focused_link(struct pager *p)
 {
-    const struct view_links *lk = active_links(p);
+    const struct tam_render_links *lk = active_links(p);
     if (!lk || p->focused_link < 0 || (size_t)p->focused_link >= lk->count) {
         p->message = "No link highlighted";
         return 0;
@@ -1217,7 +1217,7 @@ static int follow_focused_link(struct pager *p)
     }
     if (kind == TAM_URI_EXTERNAL) {
         char safe[SEARCH_SIZE];
-        view_label(safe, sizeof(safe), p->width > 22 ? p->width - 22 : 40, url);
+        tam_render_label(safe, sizeof(safe), p->width > 22 ? p->width - 22 : 40, url);
         if (!p->pending_external || strcmp(p->pending_external, url) != 0) {
             free(p->pending_external);
             p->pending_external = strdup(url);
@@ -1327,32 +1327,32 @@ static int move_attn_down(struct pager *p)
         p->current.valid = false;
         return 0;
     }
-    struct position next;
-    int r = view_row_h(p->source, p->attn, p->width, p->h_offset, p->chop,
+    struct tam_position next;
+    int r = tam_render_row_h(p->source, p->attn, p->width, p->h_offset, p->chop,
                        NULL, &next);
-    if (r != VIEW_ROW)
-        return r == VIEW_ERROR ? -1 : 0;
+    if (r != TAM_RENDER_ROW)
+        return r == TAM_RENDER_ERROR ? -1 : 0;
     if (next.tab_left == 0) {
-        int b = source_byte(p->source, next.byte);
-        if (b == VIEW_EOF)
+        int b = tam_source_byte(p->source, next.byte);
+        if (b == TAM_RENDER_EOF)
             return 0;
         if (b < 0)
-            return b == VIEW_ERROR ? -1 : 0;
+            return b == TAM_RENDER_ERROR ? -1 : 0;
     }
     p->attn = next;
     bool in_view = false;
     if (p->current.valid && p->current.document) {
         for (int i = 0; i < p->current.count; i++) {
-            if (position_equal(p->current.rows[i], p->attn)) {
+            if (tam_position_equal(p->current.rows[i], p->attn)) {
                 in_view = true;
                 break;
             }
         }
     }
     if (!in_view) {
-        struct position new_top;
-        if (view_row_h(p->source, p->top, p->width, p->h_offset, p->chop,
-                       NULL, &new_top) == VIEW_ROW) {
+        struct tam_position new_top;
+        if (tam_render_row_h(p->source, p->top, p->width, p->h_offset, p->chop,
+                       NULL, &new_top) == TAM_RENDER_ROW) {
             p->top = new_top;
         }
     }
@@ -1369,11 +1369,11 @@ static int move_attn_up(struct pager *p)
     }
     if (p->attn.byte == 0 && p->attn.tab_left == 0)
         return 0;
-    struct position prev;
+    struct tam_position prev;
     if (back(p, p->attn, 1, &prev) < 0)
         return -1;
     p->attn = prev;
-    if (position_compare(p->attn, p->top) < 0)
+    if (tam_position_compare(p->attn, p->top) < 0)
         p->top = p->attn;
     catch_link_on_attn(p, -1);
     p->current.valid = false;
@@ -1382,7 +1382,7 @@ static int move_attn_up(struct pager *p)
 
 static int cycle_link(struct pager *p, int dir)
 {
-    const struct view_links *lk = active_links(p);
+    const struct tam_render_links *lk = active_links(p);
     if (!lk || lk->count == 0) {
         p->message = "No links in document";
         return 0;
@@ -1415,13 +1415,13 @@ static int cycle_link(struct pager *p, int dir)
     }
 
     p->focused_link = target;
-    struct position lpos = {.byte = lk->items[target].first_byte};
+    struct tam_position lpos = {.byte = lk->items[target].first_byte};
     if (align(p, lpos, &p->attn) < 0)
         return -1;
     bool in_view = false;
     if (p->current.valid && p->current.document) {
         for (int i = 0; i < p->current.count; i++) {
-            if (position_equal(p->current.rows[i], p->attn)) {
+            if (tam_position_equal(p->current.rows[i], p->attn)) {
                 in_view = true;
                 break;
             }
@@ -1472,7 +1472,7 @@ static void start_search(struct pager *p, int direction, bool repeat)
     off_t start = line_start(p->source, anchor);
     if (start < 0)
         start = 0;
-    p->cursor = (struct position){.byte = start};
+    p->cursor = (struct tam_position){.byte = start};
     p->job = SEARCH;
 }
 
@@ -1483,12 +1483,12 @@ static int read_logical_line(struct pager *p, off_t start,
     size_t len = 0;
     off_t pos = start;
     for (;;) {
-        int b = source_byte(p->source, pos);
-        if (b == VIEW_WAIT || b == VIEW_ERROR)
+        int b = tam_source_byte(p->source, pos);
+        if (b == TAM_RENDER_WAIT || b == TAM_RENDER_ERROR)
             return b;
-        if (b == VIEW_EOF) {
+        if (b == TAM_RENDER_EOF) {
             if (pos == start)
-                return VIEW_EOF;
+                return TAM_RENDER_EOF;
             *next_line = pos;
             break;
         }
@@ -1509,7 +1509,7 @@ static int read_logical_line(struct pager *p, off_t start,
             }
             char *grown = realloc(find->line, new_cap);
             if (!grown)
-                return VIEW_ERROR;
+                return TAM_RENDER_ERROR;
             find->line = grown;
             find->line_cap = new_cap;
         }
@@ -1518,12 +1518,12 @@ static int read_logical_line(struct pager *p, off_t start,
     if (!find->line) {
         find->line = malloc(1);
         if (!find->line)
-            return VIEW_ERROR;
+            return TAM_RENDER_ERROR;
         find->line_cap = 1;
     }
     find->line[len] = '\0';
     *out_len = len;
-    return VIEW_ROW;
+    return TAM_RENDER_ROW;
 }
 
 static bool match_forward(regex_t *re, const char *line, size_t len,
@@ -1575,11 +1575,11 @@ static int step_search(struct pager *p)
                 p->message = "Pattern not found";
                 p->job = IDLE;
                 p->dirty = true;
-                return VIEW_ROW;
+                return TAM_RENDER_ROW;
             }
             off_t prev = line_start(p->source, p->cursor.byte - 1);
             if (prev < 0)
-                return VIEW_ERROR;
+                return TAM_RENDER_ERROR;
             p->cursor.byte = prev;
             find->first_line = false;
             find->anchor = -1;
@@ -1588,13 +1588,13 @@ static int step_search(struct pager *p)
         size_t len = 0;
         off_t next_line = 0;
         int rc = read_logical_line(p, p->cursor.byte, &len, &next_line);
-        if (rc == VIEW_WAIT || rc == VIEW_ERROR)
+        if (rc == TAM_RENDER_WAIT || rc == TAM_RENDER_ERROR)
             return rc;
-        if (rc == VIEW_EOF) {
+        if (rc == TAM_RENDER_EOF) {
             p->message = "Pattern not found";
             p->job = IDLE;
             p->dirty = true;
-            return VIEW_ROW;
+            return TAM_RENDER_ROW;
         }
 
         size_t match_col = 0;
@@ -1615,14 +1615,14 @@ static int step_search(struct pager *p)
         if (matched) {
             save_jump_mark(p);
             find->hit = p->cursor.byte + (off_t)match_col;
-            struct position hit = {.byte = find->hit};
+            struct tam_position hit = {.byte = find->hit};
             if (align(p, hit, &p->top) < 0)
-                return VIEW_ERROR;
+                return TAM_RENDER_ERROR;
             p->attn = p->top;
             catch_link_on_attn(p, 1);
             p->job = IDLE;
             p->dirty = true;
-            return VIEW_ROW;
+            return TAM_RENDER_ROW;
         }
 
         find->first_line = false;
@@ -1632,18 +1632,18 @@ static int step_search(struct pager *p)
             p->message = "Pattern not found";
             p->job = IDLE;
             p->dirty = true;
-            return VIEW_ROW;
+            return TAM_RENDER_ROW;
         } else {
             off_t prev = line_start(p->source, p->cursor.byte - 1);
             if (prev < 0)
-                return VIEW_ERROR;
+                return TAM_RENDER_ERROR;
             p->cursor.byte = prev;
         }
     }
-    return VIEW_ROW;
+    return TAM_RENDER_ROW;
 }
 
-static int last_page(struct pager *p, struct position end)
+static int last_page(struct pager *p, struct tam_position end)
 {
     p->job = IDLE;
     p->dirty = true;
@@ -1658,26 +1658,26 @@ static int last_page(struct pager *p, struct position end)
     return 0;
 }
 
-static bool anchor_matches(struct source *source, off_t offset,
+static bool anchor_matches(struct tam_source *source, off_t offset,
                            const struct viewport_anchor *anchor)
 {
     for (size_t i = 0; i < anchor->length; i++) {
-        if (source_byte(source, offset + (off_t)i) != anchor->text[i])
+        if (tam_source_byte(source, offset + (off_t)i) != anchor->text[i])
             return false;
     }
     if (anchor->length == sizeof(anchor->text))
         return true;
-    int after = source_byte(source, offset + (off_t)anchor->length);
-    return after == '\n' || after == VIEW_EOF;
+    int after = tam_source_byte(source, offset + (off_t)anchor->length);
+    return after == '\n' || after == TAM_RENDER_EOF;
 }
 
-static off_t find_anchor(struct source *source,
+static off_t find_anchor(struct tam_source *source,
                          const struct viewport_anchor *anchor, off_t size)
 {
     if (anchor->length == 0 || size == 0)
         return -1;
     off_t old = anchor->line_byte;
-    if (old < size && (old == 0 || source_byte(source, old - 1) == '\n') &&
+    if (old < size && (old == 0 || tam_source_byte(source, old - 1) == '\n') &&
         anchor_matches(source, old, anchor))
         return old;
 
@@ -1688,7 +1688,7 @@ static off_t find_anchor(struct source *source,
                 ? size : center + ANCHOR_WINDOW;
     off_t best = -1;
     off_t distance = 0;
-    bool line = start == 0 || source_byte(source, start - 1) == '\n';
+    bool line = start == 0 || tam_source_byte(source, start - 1) == '\n';
     for (off_t offset = start; offset < end; offset++) {
         off_t gap = offset < old ? old - offset : offset - old;
         if (line && (best < 0 || gap < distance) &&
@@ -1696,7 +1696,7 @@ static off_t find_anchor(struct source *source,
             best = offset;
             distance = gap;
         }
-        int b = source_byte(source, offset);
+        int b = tam_source_byte(source, offset);
         if (b < 0)
             break;
         line = b == '\n';
@@ -1706,17 +1706,17 @@ static off_t find_anchor(struct source *source,
 
 static int restore_viewport(struct pager *p, const struct viewport_anchor *anchor)
 {
-    off_t size = source_size(p->source);
+    off_t size = tam_source_size(p->source);
     if (size < 0)
         return -1;
     if (size == 0) {
-        p->top = (struct position){0};
+        p->top = (struct tam_position){0};
         return 0;
     }
     off_t match = find_anchor(p->source, anchor, size);
     if (match >= 0) {
         off_t offset = anchor->row_offset < size - match ? anchor->row_offset : 0;
-        if (align(p, (struct position){.byte = match + offset}, &p->top) < 0)
+        if (align(p, (struct tam_position){.byte = match + offset}, &p->top) < 0)
             return -1;
         return back(p, p->top, anchor->rows_above, &p->top);
     }
@@ -1730,9 +1730,9 @@ static int restore_viewport(struct pager *p, const struct viewport_anchor *ancho
             return 0;
         }
     }
-    struct position target = p->top;
+    struct tam_position target = p->top;
     if (target.byte >= size)
-        target = (struct position){.byte = size - 1};
+        target = (struct tam_position){.byte = size - 1};
     return align(p, target, &p->top);
 }
 
@@ -1759,10 +1759,10 @@ static int watch_active_file(struct pager *p, bool switching)
         return 0;
 
     if (replacement >= 0) {
-        source_close(&file->source);
+        tam_source_close(&file->source);
         if (file->own_fd)
             close(file->fd);
-        file->source = (struct source){
+        file->source = (struct tam_source){
             .input = replacement, .fd = replacement, .eof = true, .block = -1
         };
         file->fd = replacement;
@@ -1795,7 +1795,7 @@ static int watch_active_file(struct pager *p, bool switching)
     p->dirty = true;
     p->redraw = true;
     if (tail) {
-        p->cursor = (struct position){0};
+        p->cursor = (struct tam_position){0};
         p->job = GO_END;
         return 0;
     }
@@ -1811,17 +1811,17 @@ static int watch_active_file(struct pager *p, bool switching)
 static int step_job(struct pager *p)
 {
     struct file_entry *cur = &p->files[p->file_index];
-    struct source *s = p->source;
+    struct tam_source *s = p->source;
     if (p->job == GO_END) {
         if (!p->following && (!s->eof || !cur->source.eof))
-            return VIEW_WAIT;
+            return TAM_RENDER_WAIT;
         off_t size = 0;
-        if (source_refresh(s, &size) < 0)
-            return VIEW_ERROR;
+        if (tam_source_refresh(s, &size) < 0)
+            return TAM_RENDER_ERROR;
         p->follow_size = size;
         if (size || s->spool)
-            return last_page(p, (struct position){.byte = size}) < 0
-                       ? VIEW_ERROR : VIEW_ROW;
+            return last_page(p, (struct tam_position){.byte = size}) < 0
+                       ? TAM_RENDER_ERROR : TAM_RENDER_ROW;
         // Some seekable pseudo-files report size zero despite having content.
     }
 
@@ -1830,12 +1830,12 @@ static int step_job(struct pager *p)
         int overlap = full_page ? page_overlap(p) : 0;
         // Save the new top as we scan, then confirm there is a new row.
         while (p->remaining) {
-            struct position next;
-            int result = view_row_h(s, p->cursor, p->width,
+            struct tam_position next;
+            int result = tam_render_row_h(s, p->cursor, p->width,
                                     p->h_offset, p->chop, NULL, &next);
-            if (result == VIEW_EOF)
+            if (result == TAM_RENDER_EOF)
                 goto advance_eof;
-            if (result != VIEW_ROW)
+            if (result != TAM_RENDER_ROW)
                 return result;
             p->cursor = next;
             p->remaining--;
@@ -1843,8 +1843,8 @@ static int step_job(struct pager *p)
                 p->page_target = next;
         }
         if (p->cursor.tab_left == 0) {
-            int next = source_byte(s, p->cursor.byte);
-            if (next == VIEW_EOF)
+            int next = tam_source_byte(s, p->cursor.byte);
+            if (next == TAM_RENDER_EOF)
                 goto advance_eof;
             if (next < 0)
                 return next;
@@ -1861,27 +1861,27 @@ static int step_job(struct pager *p)
         p->scroll = true;
         p->dirty = true;
         p->job = IDLE;
-        return VIEW_ROW;
+        return TAM_RENDER_ROW;
 
 advance_eof:
         if (!full_page)
-            return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+            return last_page(p, p->cursor) < 0 ? TAM_RENDER_ERROR : TAM_RENDER_ROW;
         // EOF is already visible. Keep the same page.
         p->job = IDLE;
         p->dirty = true;
-        return VIEW_ROW;
+        return TAM_RENDER_ROW;
     }
 
     if (p->job == SEARCH)
         return step_search(p);
 
-    for (int i = 0; i < VIEW_BLOCK; i++) {
+    for (int i = 0; i < TAM_SOURCE_BLOCK; i++) {
         off_t offset = p->cursor.byte;
-        int b = offset < 0 ? VIEW_EOF : source_byte(s, offset);
-        if (b == VIEW_WAIT || b == VIEW_ERROR)
+        int b = offset < 0 ? TAM_RENDER_EOF : tam_source_byte(s, offset);
+        if (b == TAM_RENDER_WAIT || b == TAM_RENDER_ERROR)
             return b;
-        if (b == VIEW_EOF)
-            return last_page(p, p->cursor) < 0 ? VIEW_ERROR : VIEW_ROW;
+        if (b == TAM_RENDER_EOF)
+            return last_page(p, p->cursor) < 0 ? TAM_RENDER_ERROR : TAM_RENDER_ROW;
         p->cursor.byte++;
         if (p->job == GO_LINE && b == '\n' && --p->remaining == 0) {
             p->top = p->cursor;
@@ -1892,12 +1892,12 @@ advance_eof:
             }
             break;
         }
-        if (i == VIEW_BLOCK - 1)
-            return VIEW_ROW;
+        if (i == TAM_SOURCE_BLOCK - 1)
+            return TAM_RENDER_ROW;
     }
     p->job = IDLE;
     p->dirty = true;
-    return VIEW_ROW;
+    return TAM_RENDER_ROW;
 }
 
 static void edit_query(struct pager *p, tam_key_event_t key)
@@ -2006,7 +2006,7 @@ static void handle_colon_prompt(struct pager *p, tam_key_event_t key, int c,
         (void)switch_file(p, target);
     } else if (c == 'f') {
         char name[SEARCH_SIZE + 1];
-        view_label(name, sizeof(name), p->width, p->label);
+        tam_render_label(name, sizeof(name), p->width, p->label);
         if (p->cli_file_count > 1 && p->file_index < p->cli_file_count) {
             snprintf(p->message_buf, sizeof(p->message_buf),
                      "file %zu of %zu: %s", p->file_index + 1,
@@ -2177,9 +2177,9 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         }
         p->source = active_source(cur);
         invalidate_row_index(cur);
-        p->top = (struct position){0};
-        p->attn = (struct position){0};
-        p->cursor = (struct position){0};
+        p->top = (struct tam_position){0};
+        p->attn = (struct tam_position){0};
+        p->cursor = (struct tam_position){0};
         p->h_offset = 0;
         p->search.hit = -1;
         p->focused_link = -1;
@@ -2201,7 +2201,7 @@ static int handle_key(struct pager *p, tam_key_event_t key)
     } else if ((c == 'g' && count > 0) || key.type == TAM_KEY_HOME || c == '<') {
         save_jump_mark(p);
         p->search.hit = -1;
-        p->cursor = (struct position){0};
+        p->cursor = (struct tam_position){0};
         if (count > 1 && c == 'g') {
             p->remaining = count - 1;
             p->job = GO_LINE;
@@ -2213,7 +2213,7 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         }
     } else if (c == 'G' || key.type == TAM_KEY_END) {
         save_jump_mark(p);
-        p->cursor = (struct position){0};
+        p->cursor = (struct tam_position){0};
         p->job = GO_END;
     } else if (c == 'F') {
         if (p->opts.no_watch && p->files[p->file_index].named) {
@@ -2222,7 +2222,7 @@ static int handle_key(struct pager *p, tam_key_event_t key)
         }
         save_jump_mark(p);
         p->following = true;
-        p->cursor = (struct position){0};
+        p->cursor = (struct tam_position){0};
         p->job = GO_END;
     } else if (c == 'm') {
         p->prompt = MARK_SET;
@@ -2280,9 +2280,9 @@ static int refresh_size(struct pager *p)
     if (cur->render_mode) {
         ensure_rendered(p, cur);
         p->source = active_source(cur);
-        off_t sz = source_size(p->source);
+        off_t sz = tam_source_size(p->source);
         if (sz >= 0 && p->top.byte >= sz)
-            p->top = (struct position){0};
+            p->top = (struct tam_position){0};
         if (sz >= 0 && p->attn.byte >= sz)
             p->attn = p->top;
     }
@@ -2375,10 +2375,10 @@ static int run(struct pager *p, int wake)
             }
         }
 
-        int job_state = VIEW_ROW;
+        int job_state = TAM_RENDER_ROW;
         if (p->job != IDLE) {
             job_state = step_job(p);
-            if (job_state == VIEW_ERROR)
+            if (job_state == TAM_RENDER_ERROR)
                 return -1;
         }
         if (p->dirty && paint(p) < 0)
@@ -2406,13 +2406,13 @@ static int run(struct pager *p, int wake)
                                current_file->source.spool &&
                                !current_file->source.eof;
         bool pump = !current_file->source.eof &&
-                    (rendering_input || p->waiting || job_state == VIEW_WAIT || p->following);
+                    (rendering_input || p->waiting || job_state == TAM_RENDER_WAIT || p->following);
         struct pollfd fds[] = {
             {.fd = wake, .events = POLLIN},
             {.fd = p->tty.in_fd, .events = POLLIN},
             {.fd = pump ? current_file->source.input : -1, .events = POLLIN}
         };
-        bool scanning = p->job != IDLE && job_state != VIEW_WAIT;
+        bool scanning = p->job != IDLE && job_state != TAM_RENDER_WAIT;
         int timeout = scanning ? 0
                     : tam_key_pending(&p->keys) ? 50
                     : (p->following && !watching && !p->source->spool)
@@ -2450,12 +2450,12 @@ static int run(struct pager *p, int wake)
             if (p->following && !current_file->named && !p->source->spool &&
                 p->job == IDLE) {
                 off_t new_size = 0;
-                if (source_refresh(p->source, &new_size) == 0 &&
+                if (tam_source_refresh(p->source, &new_size) == 0 &&
                     new_size != p->follow_size) {
                     p->follow_size = new_size;
                     p->redraw = true;
                     if (new_size < p->top.byte)
-                        p->top = (struct position){0};
+                        p->top = (struct tam_position){0};
                     p->job = GO_END;
                 }
             }
@@ -2472,7 +2472,7 @@ static int run(struct pager *p, int wake)
             continue;
         }
         if (fds[2].revents) {
-            if (source_pump(&current_file->source) < 0)
+            if (tam_source_pump(&current_file->source) < 0)
                 return -1;
             if (rendering_input) {
                 if (pump_ready_source(&current_file->source) < 0)
@@ -2480,9 +2480,9 @@ static int run(struct pager *p, int wake)
                 ssize_t previous_link = p->focused_link;
                 ensure_rendered(p, current_file);
                 p->source = active_source(current_file);
-                off_t sz = source_size(p->source);
+                off_t sz = tam_source_size(p->source);
                 if (sz >= 0 && p->top.byte >= sz)
-                    p->top = (struct position){0};
+                    p->top = (struct tam_position){0};
                 if (sz >= 0 && p->attn.byte >= sz)
                     p->attn = p->top;
                 if (align(p, p->top, &p->top) < 0 ||
@@ -2524,21 +2524,21 @@ static int run(struct pager *p, int wake)
 
 static int dump_inputs(struct file_entry *files, size_t count)
 {
-    int result = view_dump(&files[0].source, 80);
+    int result = tam_render_dump(&files[0].source, 80);
     for (size_t i = 1; result == 0 && i < count; i++) {
         int fd = open(files[i].path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
         if (fd < 0)
             return -1;
-        struct source s;
-        if (source_open(&s, fd) < 0) {
+        struct tam_source s;
+        if (tam_source_open(&s, fd) < 0) {
             int err = errno;
             close(fd);
             errno = err;
             return -1;
         }
-        result = view_dump(&s, 80);
+        result = tam_render_dump(&s, 80);
         int err = errno;
-        source_close(&s);
+        tam_source_close(&s);
         close(fd);
         errno = err;
     }
@@ -2557,8 +2557,8 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
         files[i].named = inputs[i].named;
     }
     int opened = opts.no_watch && files[0].named
-                 ? source_snapshot(&files[0].source, inputs[0].fd)
-                 : source_open(&files[0].source, inputs[0].fd);
+                 ? tam_source_snapshot(&files[0].source, inputs[0].fd)
+                 : tam_source_open(&files[0].source, inputs[0].fd);
     if (opened < 0) {
         int err = errno;
         free(files);
@@ -2586,7 +2586,7 @@ int view_interactive(const struct view_input *inputs, size_t count, int tty,
         !p.tty.interactive) {
         result = dump_inputs(files, count);
         int err = errno;
-        source_close(&files[0].source);
+        tam_source_close(&files[0].source);
         free(files);
         errno = err;
         return result;
@@ -2638,14 +2638,14 @@ cleanup:;
     free(p.pending_external);
     for (size_t i = 0; i < p.file_count; i++) {
         if (p.files[i].has_rendered) {
-            source_close(&p.files[i].rendered);
-            view_styles_free(&p.files[i].rendered_styles);
-            view_links_free(&p.files[i].rendered_links);
+            tam_source_close(&p.files[i].rendered);
+            tam_render_styles_free(&p.files[i].rendered_styles);
+            tam_render_links_free(&p.files[i].rendered_links);
         }
         free(p.files[i].row_index);
         watch_close(&p.files[i].watch);
         if (p.files[i].opened)
-            source_close(&p.files[i].source);
+            tam_source_close(&p.files[i].source);
         if (p.files[i].own_fd && p.files[i].fd >= 0)
             close(p.files[i].fd);
         if (p.files[i].own_path)

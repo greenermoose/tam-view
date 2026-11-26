@@ -25,9 +25,11 @@ Follows the tam-idol 1.1.0 standard.
 
 BUILD AND TRY
 
-  Needs a C11 compiler, Make, and libtam 0.9.1 or later.
-  LIBTAM_PREFIX defaults to $HOME/.local. The binary links libc and
-  the static libtam archive.
+  Needs a C11 compiler, Make, and libtam 0.13.0 or later, whose
+  libtam-render archive holds the document source, layout and
+  Markdown/HTML/Mermaid renderers. LIBTAM_PREFIX defaults to
+  $HOME/.local. The binary links libc and the static libtam-render and
+  libtam archives.
 
     make
     make test
