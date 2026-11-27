@@ -1,67 +1,65 @@
 # tam-view roadmap
 
-## 0.0.1 — First text viewer
+`tam-view` is Tamlinux's terminal text, Markdown, HTML, and Mermaid
+viewer, written in C17 on top of `libtam`.
 
-Page through a file or piped input. Move backward and forward, jump to a
-line, and search for literal text. Leave the last view visible on exit.
+- **Current version:** `0.4.6` (branch `dev`)
+- **Progress:** All 5 phases done (in maintenance)
+- **Versioning:** Semantic versioning; during 0.x, minor marks a phase and
+  patch marks milestones or fixes within it.
 
-## 0.1.0 — More ways to navigate text
+## Phase summary
 
-Add POSIX regular-expression search, marks, horizontal scrolling, a
-file list, and follow mode. Keep the default exit behavior.
+| Phase | Versions | Goal | Plan | Status |
+| --- | --- | --- | --- | --- |
+| **P1** | 0.0.1–0.1.0 | Reliable terminal text viewer with regex search, marks, horizontal scroll, and follow mode | [P1-text-viewer.md](plans/P1-text-viewer.md) | Done |
+| **P2** | 0.2.0 | Render Markdown, HTML, and Mermaid diagrams as readable terminal text | [P2-rendering.md](plans/P2-rendering.md) | Done |
+| **P3** | 0.3.0–0.3.1 | ANSI SGR styling, live regex search highlighting, and EOF wait default | [P3-styling-and-highlighting.md](plans/P3-styling-and-highlighting.md) | Done (2026-11-22) |
+| **P4** | 0.4.0–0.4.6 | Link navigation, page overlap, `libtam-render` extraction, and `libtam` TTY/pause integration | [P4-link-navigation.md](plans/P4-link-navigation.md) | Done (2026-11-26) |
+| **P5** | 0.4.2+ | Watch active named files by default as data is appended | [P5-watch-mode.md](plans/P5-watch-mode.md) | Done (2026-11-25) |
 
-## 0.2.0 — Render documents and diagrams
+## Phases and milestones
 
-Keep raw text as the default. Add a render mode for Markdown, HTML, and
-Mermaid that lays the document out as readable terminal text. Start with
-document structure and Mermaid flowcharts that fit a Linux console
-including an ASCII layout. Use the same pager for both viewing modes.
+### Phase P1: Reliable text viewer (0.0.1–0.1.0) — [P1-text-viewer.md](plans/P1-text-viewer.md)
 
-## 0.3.0 — ANSI terminal styling and search highlighting
+| Version | Milestone | Status |
+| --- | --- | --- |
+| **0.0.1** | First text viewer: page files or piped input, jump to line, literal search, leave last view on exit | Done |
+| **0.1.0** | POSIX regex search, marks, horizontal scrolling, file list, and follow mode | Done |
 
-Add optional ANSI SGR styling for rendered Markdown, HTML, and Mermaid
-documents and live regex search highlighting in both raw and rendered
-modes using sidecar byte-offset style spans so search, wrapping, and
-input sanitization remain exact. Support `--color`/`--no-color`,
-`NO_COLOR`, `TERM=dumb`, `TERM=linux`, live `C` color toggle, and `Esc`
-highlight clearing.
+### Phase P2: Render markup and diagrams (0.2.0) — [P2-rendering.md](plans/P2-rendering.md)
 
-## 0.4.0 — Link navigation
+| Version | Milestone | Status |
+| --- | --- | --- |
+| **0.2.0** | Render mode for Markdown, HTML, and Mermaid flowcharts (including Linux console ASCII layout) in the same pager | Done |
 
-Record link targets alongside rendered documents so users can focus and
-follow hyperlinks from Markdown and HTML. Support keyboard link cycling
-and following (opening local/relative documents and anchors inside
-tam-view with back-history, and handing external URLs to `xdg-open`),
-plus optional OSC 8 terminal hyperlinks on capable terminals.
+### Phase P3: Styling and search highlighting (0.3.0–0.3.1) — [P3-styling-and-highlighting.md](plans/P3-styling-and-highlighting.md)
 
-## 0.4.2 — Page overlap and full-window layout
+| Version | Milestone | Status |
+| --- | --- | --- |
+| **0.3.0** | Optional ANSI SGR styling and live regex search highlighting via sidecar spans (`--color`/`--no-color`, `NO_COLOR`, `C` toggle) | Done (2026-11-22) |
+| **0.3.1** | Wait for `q` at EOF by default; add `-E`/`--quit-at-eof` option | Done (2026-11-22) |
 
-Full-page navigation repeats two displayed rows by default. Set the
-count in both directions with `--overlap`. Short files and short final
-pages start at the top of the terminal, with the footer at the bottom.
+### Phase P4: Link navigation and libtam integration (0.4.0–0.4.6) — [P4-link-navigation.md](plans/P4-link-navigation.md)
 
+| Version | Milestone | Status |
+| --- | --- | --- |
+| **0.4.0** | Hyperlink focus/following (local docs/anchors with back-history, external `xdg-open`, OSC 8), attention line, footer, `g` guide | Done (2026-11-22) |
+| **0.4.1** | Review R1 fixes for piped rendering, cache invalidation, HTML entities, list wrapping, and Mermaid state diagrams | Done (2026-11-25) |
+| **0.4.2** | Configurable page overlap (`--overlap`, default 2 rows) and full-window top-aligned layout | Done (2026-11-25) |
+| **0.4.3** | Move renderer into `libtam-render.a` (`libtam` 0.13.0) so `tam-view` and `tam-knox` share one copy | Done (2026-11-26) |
+| **0.4.4** | Suspend/resume, crash restore, clock, output loop, and locale setup through `libtam` | Done (2026-11-26) |
+| **0.4.5** | `Ctrl+P` pauses viewer per keybinding standard; `Ctrl+Z` (Undo) does nothing in viewer | Done (2026-11-26) |
+| **0.4.6** | `Ctrl+P` pauses through `tam_tty_job_stop` (`libtam` 0.14.1), including session leaders | Done (2026-11-26) |
 
-## 0.4.3 — Renderer in libtam
+### Phase P5: Watch mode (0.4.2+) — [P5-watch-mode.md](plans/P5-watch-mode.md)
 
-The document source, layout and Markdown/HTML/Mermaid renderers moved
-into libtam's `libtam-render.a` (libtam 0.13.0), so tam-knox shares one
-copy instead of carrying its own. tam-view links the archive; its
-behaviour is unchanged. The renderer's tests moved to libtam with it.
+| Version | Milestone | Status |
+| --- | --- | --- |
+| **0.4.2** | Watch named files by default in the interactive pager, keeping the tail visible when already at EOF | Done (2026-11-25) |
 
-## 0.4.4 — More of libtam
+## How a milestone is done
 
-Ctrl+Z suspends and resumes through libtam (still SIGSTOP, which also
-stops a session leader), the terminal is restored after a crash or an
-exit that skips cleanup, and the clock, output loop and locale setup use
-libtam.
-
-## 0.4.5 — Ctrl+P pauses, Ctrl+Z is Undo
-
-Following the tam-idol keybinding standard: Ctrl+P pauses the viewer
-(Pause, as the shell's VSUSP), and Ctrl+Z, which is Undo everywhere,
-does nothing in a viewer instead of suspending it.
-
-## 0.4.6 — Pause through libtam
-
-Ctrl+P pauses through `tam_tty_job_stop` (libtam 0.14.1), which now also
-pauses a session leader; tam-view no longer raises SIGSTOP itself.
+A milestone is done when its acceptance checks in the phase plan pass and
+Fred has tried the build. When a milestone lands, bump `VERSION`, update
+the phase plan's status, and update this roadmap in the same change.

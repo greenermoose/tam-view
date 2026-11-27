@@ -1,0 +1,26 @@
+W13 ROADMAP STANDARD (TAM-IDOL 1.3.0)
+
+Date: 2026-11-26
+AI harness: agy 1.5.18
+AI model: Gemini 4 Neon (Medium)
+Commits: the commit that adds this record
+
+GUIDANCE
+
+  Fred approved the tam-idol 1.3.0 ROADMAP.md standard and rollout across
+  all Tamlinux repositories.
+
+DONE
+
+  - Updated ROADMAP.md to the tam-idol 1.3.0 standard with Phase summary
+    table and per-phase milestone status tables (P1-P5, 0.0.1-0.4.6).
+  - Updated plans/README-plans IN THIS REPOSITORY to list P1-P5.
+  - Updated README to follow the tam-idol 1.3.0 standard.
+
+FAILED
+
+  - Nothing.
+
+HANDOFF
+
+  - Keep ROADMAP.md updated alongside VERSION and plans/P<n>-*.md.

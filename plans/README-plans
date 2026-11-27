@@ -42,5 +42,8 @@ KEEPING PLANS CURRENT
 
 IN THIS REPOSITORY
 
-  P1-text-viewer.md  0.0.x to 0.1.x, the text viewer
-  P2-rendering.md    0.2.x, rendering markup for a text terminal
+  P1-text-viewer.md               0.0.1 to 0.1.0, the text viewer
+  P2-rendering.md                 0.2.0, rendering markup and Mermaid
+  P3-styling-and-highlighting.md  0.3.x, ANSI styling and highlighting
+  P4-link-navigation.md           0.4.x, links and libtam integration
+  P5-watch-mode.md                0.4.2+, watch named files by default
